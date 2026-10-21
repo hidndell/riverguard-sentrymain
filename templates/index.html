@@ -1,0 +1,1308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RiverGuard Sentry | Autonomous LoRa Mesh Flood Detection Network</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        :root {
+            --bg-base: #070b14;
+            --bg-surface: #0f172a;
+            --bg-card: rgba(17, 25, 45, 0.85);
+            --bg-card-hover: rgba(24, 35, 62, 0.95);
+            --border-subtle: rgba(148, 163, 184, 0.14);
+            --border-highlight: rgba(56, 189, 248, 0.35);
+
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+
+            --accent-cyan: #06b6d4;
+            --accent-blue: #3b82f6;
+
+            --safe-bg: rgba(16, 185, 129, 0.14);
+            --safe-border: #10b981;
+            --safe-text: #34d399;
+
+            --warn-bg: rgba(245, 158, 11, 0.16);
+            --warn-border: #f59e0b;
+            --warn-text: #fbbf24;
+
+            --crit-bg: rgba(239, 68, 68, 0.18);
+            --crit-border: #ef4444;
+            --crit-text: #f87171;
+
+            --radius-lg: 16px;
+            --radius-md: 12px;
+            --radius-sm: 8px;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background-color: var(--bg-base);
+            background-image:
+                radial-gradient(circle at 12% 10%, rgba(6, 182, 212, 0.10), transparent 35%),
+                radial-gradient(circle at 88% 15%, rgba(59, 130, 246, 0.10), transparent 40%);
+            color: var(--text-primary);
+            min-height: 100vh;
+            line-height: 1.5;
+            padding-bottom: 48px;
+        }
+
+        .mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        /* --- TOP NAVIGATION / TELEMETRY BAR --- */
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 40;
+            background: rgba(7, 11, 20, 0.85);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            border-bottom: 1px solid var(--border-subtle);
+            padding: 14px 24px;
+        }
+
+        .topbar-inner {
+            max-width: 1360px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .brand-icon {
+            width: 42px;
+            height: 42px;
+            border-radius: 11px;
+            background: linear-gradient(135deg, #06b6d4, #2563eb);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 20px rgba(6, 182, 212, 0.35);
+            flex-shrink: 0;
+        }
+
+        .brand-icon svg {
+            width: 24px;
+            height: 24px;
+            color: #fff;
+        }
+
+        .brand-title {
+            font-size: 1.15rem;
+            font-weight: 800;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .brand-badge {
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: rgba(6, 182, 212, 0.16);
+            color: #22d3ee;
+            border: 1px solid rgba(6, 182, 212, 0.35);
+        }
+
+        .brand-subtitle {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .topbar-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .live-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: rgba(16, 185, 129, 0.12);
+            border: 1px solid rgba(16, 185, 129, 0.35);
+            color: #34d399;
+            font-size: 0.78rem;
+            font-weight: 600;
+        }
+
+        .live-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #10b981;
+            box-shadow: 0 0 8px #10b981;
+            animation: blink 1.8s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.35; }
+        }
+
+        .clock-box {
+            padding: 6px 12px;
+            border-radius: var(--radius-sm);
+            background: rgba(30, 41, 59, 0.65);
+            border: 1px solid var(--border-subtle);
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 8px 14px;
+            border-radius: var(--radius-sm);
+            font-size: 0.82rem;
+            font-weight: 600;
+            cursor: pointer;
+            border: 1px solid var(--border-subtle);
+            background: rgba(30, 41, 59, 0.8);
+            color: var(--text-primary);
+            transition: all 0.2s ease;
+        }
+
+        .btn:hover {
+            background: rgba(51, 65, 85, 0.9);
+            border-color: rgba(148, 163, 184, 0.35);
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #0891b2, #2563eb);
+            border-color: rgba(56, 189, 248, 0.4);
+        }
+
+        .btn-primary:hover {
+            filter: brightness(1.1);
+        }
+
+        /* --- MAIN CONTAINER --- */
+        .container {
+            max-width: 1360px;
+            margin: 24px auto 0;
+            padding: 0 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        /* --- HERO THREAT BANNER --- */
+        .threat-banner {
+            border-radius: var(--radius-lg);
+            padding: 22px 26px;
+            background: var(--safe-bg);
+            border: 1px solid var(--safe-border);
+            display: grid;
+            grid-template-columns: 1.3fr 1fr;
+            gap: 20px;
+            align-items: center;
+            transition: all 0.35s ease;
+        }
+
+        .threat-banner.mode-1 {
+            background: linear-gradient(135deg, rgba(16, 185, 129, 0.16), rgba(15, 23, 42, 0.9));
+            border-color: var(--safe-border);
+        }
+
+        .threat-banner.mode-2 {
+            background: linear-gradient(135deg, rgba(245, 158, 11, 0.20), rgba(15, 23, 42, 0.9));
+            border-color: var(--warn-border);
+            box-shadow: 0 0 25px rgba(245, 158, 11, 0.15);
+        }
+
+        .threat-banner.mode-3 {
+            background: linear-gradient(135deg, rgba(239, 68, 68, 0.28), rgba(15, 23, 42, 0.92));
+            border-color: var(--crit-border);
+            animation: criticalPulse 1.2s infinite alternate;
+        }
+
+        @keyframes criticalPulse {
+            from { box-shadow: 0 0 15px rgba(239, 68, 68, 0.25); }
+            to { box-shadow: 0 0 38px rgba(239, 68, 68, 0.65); }
+        }
+
+        .threat-main {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+        }
+
+        .threat-badge-large {
+            padding: 12px 22px;
+            border-radius: var(--radius-md);
+            font-size: 1.65rem;
+            font-weight: 800;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--safe-text);
+            border: 1px solid rgba(16, 185, 129, 0.45);
+            white-space: nowrap;
+        }
+
+        .mode-2 .threat-badge-large {
+            background: rgba(245, 158, 11, 0.22);
+            color: var(--warn-text);
+            border-color: rgba(245, 158, 11, 0.5);
+        }
+
+        .mode-3 .threat-badge-large {
+            background: rgba(239, 68, 68, 0.28);
+            color: #fca5a5;
+            border-color: rgba(239, 68, 68, 0.65);
+        }
+
+        .threat-info h2 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            margin-bottom: 4px;
+        }
+
+        .threat-info p {
+            font-size: 0.88rem;
+            color: var(--text-secondary);
+        }
+
+        .hardware-strip {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+        }
+
+        .hw-chip {
+            background: rgba(15, 23, 42, 0.75);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            padding: 10px 12px;
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+
+        .hw-chip-label {
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .hw-chip-val {
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        /* --- TELEMETRY CARDS + RIVER GAUGE GRID --- */
+        .telemetry-grid {
+            display: grid;
+            grid-template-columns: 1.15fr 1fr 1fr;
+            gap: 20px;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            padding: 22px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 14px;
+            gap: 10px;
+        }
+
+        .card-title {
+            font-size: 0.92rem;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+        }
+
+        .node-tag {
+            font-size: 0.72rem;
+            font-weight: 600;
+            padding: 3px 9px;
+            border-radius: 999px;
+            background: rgba(59, 130, 246, 0.14);
+            color: #60a5fa;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+        }
+
+        .distance-big {
+            font-size: 3.1rem;
+            font-weight: 800;
+            color: #22d3ee;
+            line-height: 1.05;
+            margin: 6px 0 10px;
+            display: flex;
+            align-items: baseline;
+            gap: 8px;
+        }
+
+        .distance-unit {
+            font-size: 1.15rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+        }
+
+        .node-meta {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            padding-top: 12px;
+            border-top: 1px solid var(--border-subtle);
+            margin-top: 10px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        /* --- RIVER LEVEL CROSS-SECTION GAUGE --- */
+        .gauge-wrapper {
+            display: flex;
+            gap: 18px;
+            align-items: stretch;
+            height: 185px;
+            margin-top: 6px;
+        }
+
+        .river-tank {
+            flex: 1;
+            position: relative;
+            background: linear-gradient(180deg, rgba(15, 23, 42, 0.95) 0%, rgba(15, 23, 42, 0.6) 100%);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .sensor-beam-top {
+            z-index: 3;
+            background: rgba(30, 41, 59, 0.9);
+            border-bottom: 1px dashed rgba(148, 163, 184, 0.35);
+            padding: 5px 10px;
+            font-size: 0.72rem;
+            color: #38bdf8;
+            display: flex;
+            justify-content: space-between;
+            font-weight: 600;
+        }
+
+        .water-fill {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 25%;
+            background: linear-gradient(180deg, rgba(6, 182, 212, 0.65) 0%, rgba(37, 99, 235, 0.85) 100%);
+            border-top: 2px solid #22d3ee;
+            transition: height 0.6s cubic-bezier(0.22, 1, 0.36, 1), background 0.3s ease;
+            z-index: 1;
+        }
+
+        .water-fill.warn {
+            background: linear-gradient(180deg, rgba(245, 158, 11, 0.65) 0%, rgba(217, 119, 6, 0.85) 100%);
+            border-top-color: #fbbf24;
+        }
+
+        .water-fill.crit {
+            background: linear-gradient(180deg, rgba(239, 68, 68, 0.75) 0%, rgba(185, 28, 28, 0.9) 100%);
+            border-top-color: #f87171;
+        }
+
+        .threshold-line {
+            position: absolute;
+            left: 0;
+            right: 0;
+            z-index: 2;
+            border-top: 1px dashed;
+            font-size: 0.68rem;
+            padding: 1px 8px;
+            font-weight: 600;
+            display: flex;
+            justify-content: flex-end;
+        }
+
+        /* Sensor range is 0cm (top) to 400cm (bottom).
+           180cm from top = 55% water height from bottom.
+           300cm from top = 25% water height from bottom. */
+        .threshold-crit {
+            bottom: 55%;
+            border-color: rgba(248, 113, 113, 0.75);
+            color: #fca5a5;
+            background: rgba(239, 68, 68, 0.08);
+        }
+
+        .threshold-warn {
+            bottom: 25%;
+            border-color: rgba(251, 191, 36, 0.75);
+            color: #fde68a;
+            background: rgba(245, 158, 11, 0.08);
+        }
+
+        /* --- CHART & LOGS LAYOUT --- */
+        .main-split {
+            display: grid;
+            grid-template-columns: 1.65fr 1fr;
+            gap: 20px;
+        }
+
+        .chart-box {
+            position: relative;
+            height: 340px;
+            width: 100%;
+        }
+
+        .filter-group {
+            display: inline-flex;
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            overflow: hidden;
+        }
+
+        .filter-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 5px 11px;
+            font-size: 0.76rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .filter-btn.active {
+            background: rgba(6, 182, 212, 0.2);
+            color: #22d3ee;
+        }
+
+        /* --- LOG TABLE & SMS PANEL --- */
+        .table-wrap {
+            max-height: 230px;
+            overflow-y: auto;
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.8rem;
+        }
+
+        th {
+            position: sticky;
+            top: 0;
+            background: #0f172a;
+            color: var(--text-secondary);
+            text-align: left;
+            padding: 9px 12px;
+            font-weight: 600;
+            border-bottom: 1px solid var(--border-subtle);
+        }
+
+        td {
+            padding: 8px 12px;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.08);
+            color: var(--text-primary);
+        }
+
+        .badge-sm {
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .badge-safe { background: var(--safe-bg); color: var(--safe-text); border: 1px solid rgba(16, 185, 129, 0.35); }
+        .badge-warn { background: var(--warn-bg); color: var(--warn-text); border: 1px solid rgba(245, 158, 11, 0.35); }
+        .badge-crit { background: var(--crit-bg); color: var(--crit-text); border: 1px solid rgba(239, 68, 68, 0.45); }
+
+        .sms-box {
+            margin-top: 14px;
+            padding: 14px;
+            border-radius: var(--radius-md);
+            background: rgba(15, 23, 42, 0.75);
+            border: 1px solid var(--border-subtle);
+        }
+
+        .sms-input-row {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .input-field {
+            flex: 1;
+            background: rgba(7, 11, 20, 0.8);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            padding: 8px 12px;
+            color: var(--text-primary);
+            font-size: 0.85rem;
+        }
+
+        .input-field:focus {
+            outline: none;
+            border-color: var(--accent-cyan);
+        }
+
+        /* --- SIMULATION MODAL (<dialog>) --- */
+        dialog {
+            margin: auto;
+            background: #0f172a;
+            color: var(--text-primary);
+            border: 1px solid var(--border-highlight);
+            border-radius: var(--radius-lg);
+            padding: 24px;
+            max-width: 480px;
+            width: 92%;
+            box-shadow: 0 25px 60px rgba(0, 0, 0, 0.7);
+        }
+
+        dialog::backdrop {
+            background: rgba(3, 7, 18, 0.75);
+            backdrop-filter: blur(4px);
+        }
+
+        .sim-presets {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 10px;
+            margin: 14px 0 18px;
+        }
+
+        .sim-btn {
+            padding: 12px 10px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border-subtle);
+            background: rgba(30, 41, 59, 0.75);
+            color: var(--text-primary);
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 0.8rem;
+            text-align: center;
+            transition: all 0.2s;
+        }
+
+        .sim-btn:hover {
+            transform: translateY(-1px);
+            border-color: var(--accent-cyan);
+        }
+
+        /* --- RESPONSIVE BREAKPOINTS --- */
+        @media (max-width: 1080px) {
+            .threat-banner { grid-template-columns: 1fr; }
+            .telemetry-grid { grid-template-columns: 1fr 1fr; }
+            .main-split { grid-template-columns: 1fr; }
+        }
+
+        @media (max-width: 680px) {
+            .topbar { padding: 12px 16px; }
+            .container { padding: 0 16px; }
+            .telemetry-grid { grid-template-columns: 1fr; }
+            .hardware-strip { grid-template-columns: 1fr; }
+            .threat-main { flex-direction: column; align-items: flex-start; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- TOP TELEMETRY NAVBAR -->
+    <header class="topbar">
+        <div class="topbar-inner">
+            <div class="brand">
+                <div class="brand-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M2 12c2-2.5 4-2.5 6 0s4 2.5 6 0 4-2.5 6 0"/>
+                        <path d="M2 17c2-2.5 4-2.5 6 0s4 2.5 6 0 4-2.5 6 0"/>
+                        <path d="M12 3v6m0 0l-3-3m3 3l3-3"/>
+                    </svg>
+                </div>
+                <div>
+                    <div class="brand-title">
+                        RIVERGUARD SENTRY
+                        <span class="brand-badge">LoRa 915MHz Mesh</span>
+                    </div>
+                    <div class="brand-subtitle">Autonomous Ultrasonic Flood Detection &amp; Early Warning Network</div>
+                </div>
+            </div>
+
+            <div class="topbar-controls">
+                <div class="live-pill" id="connection-pill">
+                    <span class="live-dot" id="connection-dot"></span>
+                    <span id="connection-text">GATEWAY SYNCED</span>
+                </div>
+                <div class="clock-box mono" id="pht-clock">--:--:-- PHT</div>
+                <button class="btn" id="audio-toggle-btn" onclick="toggleAudioAlert()" title="Toggle browser acoustic alarm on Critical threat">
+                    <span id="audio-icon">🔇</span> <span id="audio-label">Audio Off</span>
+                </button>
+                <button class="btn" onclick="exportCSV()" title="Download telemetry logs as CSV">
+                    ⬇ CSV
+                </button>
+                <button class="btn btn-primary" onclick="document.getElementById('sim-modal').showModal()">
+                    ⚡ Simulate / Test
+                </button>
+            </div>
+        </div>
+    </header>
+
+    <!-- MAIN DASHBOARD BODY -->
+    <main class="container">
+
+        <!-- 1. GLOBAL THREAT HERO BANNER -->
+        <section id="threat-banner" class="threat-banner mode-1" aria-live="polite">
+            <div class="threat-main">
+                <div id="threat-level" class="threat-badge-large">SAFE</div>
+                <div class="threat-info">
+                    <h2 id="threat-headline">Normal River Surface Clearance (&ge; 300 cm)</h2>
+                    <p id="threat-desc">All sentry nodes report normal water distance. Strobe and siren relays are in standby.</p>
+                </div>
+            </div>
+
+            <div class="hardware-strip">
+                <div class="hw-chip">
+                    <span class="hw-chip-label">Strobe Relay (Pin 26)</span>
+                    <span class="hw-chip-val mono" id="relay-strobe">⚪ STANDBY (HIGH)</span>
+                </div>
+                <div class="hw-chip">
+                    <span class="hw-chip-label">Siren Relay (Pin 27)</span>
+                    <span class="hw-chip-val mono" id="relay-siren">⚪ STANDBY (HIGH)</span>
+                </div>
+                <div class="hw-chip">
+                    <span class="hw-chip-label">SIM800L GSM Dispatch</span>
+                    <span class="hw-chip-val mono" id="gsm-status">🟢 ARMED &bull; READY</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- 2. NODE TELEMETRY & VISUAL RIVER CROSS-SECTION -->
+        <section class="telemetry-grid">
+
+            <!-- Card A: Visual River Cross-Section Gauge -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Live River Cross-Section</span>
+                    <span class="node-tag mono" id="clearance-tag">Clearance: -- cm</span>
+                </div>
+                <div class="gauge-wrapper">
+                    <div class="river-tank">
+                        <div class="sensor-beam-top mono">
+                            <span>▼ JSN-SR04T SENSOR (0 cm)</span>
+                            <span id="beam-readout">-- cm to surface</span>
+                        </div>
+                        <div class="threshold-line threshold-crit mono">CRITICAL &lt; 180 cm</div>
+                        <div class="threshold-line threshold-warn mono">WARNING &lt; 300 cm</div>
+                        <div id="water-fill-bar" class="water-fill" style="height: 15%;"></div>
+                    </div>
+                </div>
+                <div class="node-meta">
+                    <span>Max Range: <strong>400 cm</strong></span>
+                    <span id="water-rise-rate" class="mono">Delta: 0 cm</span>
+                </div>
+            </div>
+
+            <!-- Card B: Node 1 (Primary Mountain / Upstream Sentry) -->
+            <div class="card">
+                <div>
+                    <div class="card-header">
+                        <span class="card-title">Node 1 &bull; Mountain Upstream</span>
+                        <span class="node-tag" id="node1-badge">PRIMARY SENTRY</span>
+                    </div>
+                    <div class="distance-big mono">
+                        <span id="node-distance">--</span>
+                        <span class="distance-unit">cm</span>
+                    </div>
+                    <p style="font-size: 0.82rem; color: var(--text-secondary);">
+                        Ultrasonic distance from sensor housing down to river surface. Lower distance indicates rising water.
+                    </p>
+                </div>
+                <div class="node-meta">
+                    <span id="last-updated">Last updated: Waiting for data...</span>
+                    <span class="mono" id="rf-metrics">RF:SX1262 Online</span>
+                </div>
+            </div>
+
+            <!-- Card C: Multi-Node Mesh Status (Node 2 & Node 3) -->
+            <div class="card">
+                <div>
+                    <div class="card-header">
+                        <span class="card-title">Mesh Relay Nodes (Nodes 2 &amp; 3)</span>
+                        <span class="node-tag" id="mesh-topology-tag">LoRa Hop Mesh</span>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px;">
+                        <div style="background: rgba(15,23,42,0.7); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 12px;">
+                            <div style="font-size: 0.75rem; color: var(--text-secondary); font-weight: 600;">NODE 2 (MIDSTREAM)</div>
+                            <div class="mono" style="font-size: 1.65rem; font-weight: 800; color: #60a5fa; margin-top: 4px;" id="node2-distance">-- cm</div>
+                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 2px;" id="node2-status">Awaiting packet</div>
+                        </div>
+                        <div style="background: rgba(15,23,42,0.7); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 12px;">
+                            <div style="font-size: 0.75rem; color: var(--text-secondary); font-weight: 600;">NODE 3 (DOWNSTREAM)</div>
+                            <div class="mono" style="font-size: 1.65rem; font-weight: 800; color: #a78bfa; margin-top: 4px;" id="node3-distance">-- cm</div>
+                            <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 2px;" id="node3-status">Awaiting packet</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="node-meta">
+                    <span>Thresholds: <strong style="color:#fbbf24;">&lt;300 Warn</strong> / <strong style="color:#f87171;">&lt;180 Crit</strong></span>
+                    <span class="mono" id="total-packets">0 Packets Logged</span>
+                </div>
+            </div>
+
+        </section>
+
+        <!-- 3. CHART & TELEMETRY LOG / SMS CONFIG -->
+        <section class="main-split">
+
+            <!-- Left: Real-Time Water Distance Chart -->
+            <div class="card">
+                <div class="card-header">
+                    <div>
+                        <div class="card-title">Real-Time Ultrasonic Telemetry Trend</div>
+                        <div style="font-size: 0.78rem; color: var(--text-secondary);">Sensor-to-water clearance (cm) over time &bull; Auto-refreshes every 4s</div>
+                    </div>
+                    <div class="filter-group" role="group" aria-label="Chart reading count">
+                        <button class="filter-btn active" onclick="setChartLimit(20, this)">20 pts</button>
+                        <button class="filter-btn" onclick="setChartLimit(50, this)">50 pts</button>
+                        <button class="filter-btn" onclick="setChartLimit(100, this)">100 pts</button>
+                    </div>
+                </div>
+                <div class="chart-box">
+                    <canvas id="waterChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Right: Packet Log Table + Dynamic SMS Number Config -->
+            <div class="card">
+                <div>
+                    <div class="card-header">
+                        <span class="card-title">Recent Gateway Telemetry Log</span>
+                        <span class="node-tag mono" id="source-indicator">LIVE DB</span>
+                    </div>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Time (PHT)</th>
+                                    <th>Status</th>
+                                    <th>Node 1</th>
+                                    <th>Node 2</th>
+                                    <th>Source</th>
+                                </tr>
+                            </thead>
+                            <tbody id="log-table-body">
+                                <tr>
+                                    <td colspan="5" style="text-align:center; color: var(--text-muted);">Loading telemetry history...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Dynamic SIM800L Emergency SMS Number Configuration -->
+                <div class="sms-box">
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase;">
+                            📱 SIM800L Emergency SMS Recipient
+                        </span>
+                        <span style="font-size: 0.72rem; color: #38bdf8;" id="sms-save-feedback">Synced with /api/get_numbers</span>
+                    </div>
+                    <p style="font-size: 0.76rem; color: var(--text-muted); margin-top: 2px;">
+                        ESP32 Core 0 fetches this number automatically before dispatching flood SMS alerts.
+                    </p>
+                    <div class="sms-input-row">
+                        <input type="text" id="sms-number-input" class="input-field mono" placeholder="+639123456789" value="+639123456789">
+                        <button class="btn btn-primary" onclick="saveEmergencyNumber()">Update</button>
+                    </div>
+                </div>
+            </div>
+
+        </section>
+
+    </main>
+
+    <!-- DEFENSE SIMULATOR / TEST MODAL -->
+    <dialog id="sim-modal">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 10px;">
+            <h3 style="font-size: 1.05rem; font-weight: 700;">⚡ Defense Telemetry Simulator</h3>
+            <button class="btn" onclick="document.getElementById('sim-modal').close()">✕</button>
+        </div>
+        <p style="font-size: 0.82rem; color: var(--text-secondary);">
+            Inject a test reading into the database to demonstrate Safe, Warning, or Critical Flood states when physical LoRa nodes are offline.
+        </p>
+
+        <div class="sim-presets">
+            <button class="sim-btn" style="border-color: var(--safe-border); color: var(--safe-text);" onclick="triggerPreset('safe')">
+                🟢 SAFE<br><span class="mono" style="font-size:0.72rem;">345 cm</span>
+            </button>
+            <button class="sim-btn" style="border-color: var(--warn-border); color: var(--warn-text);" onclick="triggerPreset('warning')">
+                🟡 WARNING<br><span class="mono" style="font-size:0.72rem;">225 cm</span>
+            </button>
+            <button class="sim-btn" style="border-color: var(--crit-border); color: var(--crit-text);" onclick="triggerPreset('critical')">
+                🔴 CRITICAL<br><span class="mono" style="font-size:0.72rem;">142 cm</span>
+            </button>
+        </div>
+
+        <div style="border-top: 1px solid var(--border-subtle); padding-top: 14px; display:flex; flex-direction:column; gap:10px;">
+            <div style="font-size: 0.8rem; font-weight: 600; color: var(--text-secondary);">Custom Sensor Distances (cm)</div>
+            <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
+                <div>
+                    <label style="font-size:0.72rem; color:var(--text-muted);">Node 1 (cm)</label>
+                    <input type="number" id="sim-n1" class="input-field mono" style="width:100%;" value="260" min="20" max="400">
+                </div>
+                <div>
+                    <label style="font-size:0.72rem; color:var(--text-muted);">Node 2 (cm)</label>
+                    <input type="number" id="sim-n2" class="input-field mono" style="width:100%;" value="295" min="20" max="999">
+                </div>
+                <div>
+                    <label style="font-size:0.72rem; color:var(--text-muted);">Node 3 (cm)</label>
+                    <input type="number" id="sim-n3" class="input-field mono" style="width:100%;" value="330" min="20" max="999">
+                </div>
+            </div>
+            <button class="btn btn-primary" style="justify-content:center; margin-top:4px;" onclick="submitCustomSimulation()">
+                Send Custom Telemetry Packet
+            </button>
+        </div>
+    </dialog>
+
+    <script>
+        let currentLimit = 20;
+        let cachedReadings = [];
+        let audioEnabled = false;
+        let audioCtx = null;
+
+        // --- 1. LIVE PHILIPPINE STANDARD TIME CLOCK ---
+        function updateClock() {
+            const now = new Date();
+            const options = {
+                timeZone: 'Asia/Manila',
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            };
+            document.getElementById('pht-clock').innerText =
+                new Intl.DateTimeFormat('en-PH', options).format(now) + ' PHT';
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        // --- 2. INITIALIZE CHART.JS WITH THRESHOLD LINES ---
+        const ctx = document.getElementById('waterChart').getContext('2d');
+        const gradientFill = ctx.createLinearGradient(0, 0, 0, 320);
+        gradientFill.addColorStop(0, 'rgba(6, 182, 212, 0.32)');
+        gradientFill.addColorStop(1, 'rgba(6, 182, 212, 0.01)');
+
+        const waterChart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: [
+                    {
+                        label: 'Node 1 Distance (cm)',
+                        data: [],
+                        borderColor: '#22d3ee',
+                        backgroundColor: gradientFill,
+                        borderWidth: 2.8,
+                        pointRadius: 3.5,
+                        pointBackgroundColor: '#06b6d4',
+                        fill: true,
+                        tension: 0.35
+                    },
+                    {
+                        label: 'Node 2 Distance (cm)',
+                        data: [],
+                        borderColor: '#60a5fa',
+                        borderWidth: 2,
+                        pointRadius: 2.5,
+                        fill: false,
+                        tension: 0.35,
+                        hidden: true
+                    },
+                    {
+                        label: 'Warning Threshold (300 cm)',
+                        data: [],
+                        borderColor: 'rgba(251, 191, 36, 0.65)',
+                        borderWidth: 1.5,
+                        borderDash: [6, 6],
+                        pointRadius: 0,
+                        fill: false
+                    },
+                    {
+                        label: 'Critical Threshold (180 cm)',
+                        data: [],
+                        borderColor: 'rgba(248, 113, 113, 0.75)',
+                        borderWidth: 1.5,
+                        borderDash: [4, 4],
+                        pointRadius: 0,
+                        fill: false
+                    }
+                ]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: 'index', intersect: false },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 400,
+                        grid: { color: 'rgba(148, 163, 184, 0.1)' },
+                        ticks: { color: '#94a3b8' },
+                        title: { display: true, text: 'Sensor-to-Water Distance (cm)', color: '#cbd5e1' }
+                    },
+                    x: {
+                        grid: { color: 'rgba(148, 163, 184, 0.06)' },
+                        ticks: { color: '#94a3b8', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        labels: { color: '#e2e8f0', boxWidth: 14, font: { size: 11 } }
+                    }
+                }
+            }
+        });
+
+        function parseUtcTimestamp(tsStr) {
+            if (!tsStr) return new Date();
+            const normalized = tsStr.endsWith('Z') ? tsStr : tsStr.replace(' ', 'T') + 'Z';
+            const d = new Date(normalized);
+            return isNaN(d.getTime()) ? new Date(tsStr) : d;
+        }
+
+        function formatPhtTime(tsStr) {
+            const d = parseUtcTimestamp(tsStr);
+            return d.toLocaleTimeString('en-PH', {
+                timeZone: 'Asia/Manila',
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            });
+        }
+
+        // --- 3. ACOUSTIC ALARM FOR CRITICAL FLOOD MODE ---
+        function toggleAudioAlert() {
+            audioEnabled = !audioEnabled;
+            if (audioEnabled && !audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            document.getElementById('audio-icon').innerText = audioEnabled ? '🔊' : '🔇';
+            document.getElementById('audio-label').innerText = audioEnabled ? 'Audio Armed' : 'Audio Off';
+        }
+
+        function playCriticalBeep() {
+            if (!audioEnabled || !audioCtx) return;
+            try {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+                osc.frequency.setValueAtTime(660, audioCtx.currentTime + 0.18);
+                gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.4);
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start();
+                osc.stop(audioCtx.currentTime + 0.4);
+            } catch (e) {}
+        }
+
+        // --- 4. FETCH & RENDER TELEMETRY ---
+        async function fetchLatestData() {
+            try {
+                const response = await fetch(`/api/get_latest?limit=${currentLimit}`);
+                if (!response.ok) throw new Error('API Error');
+                const data = await response.json();
+
+                document.getElementById('connection-text').innerText = 'GATEWAY SYNCED';
+                document.getElementById('connection-dot').style.background = '#10b981';
+
+                if (!Array.isArray(data) || data.length === 0) return;
+
+                cachedReadings = data; // Newest first
+                const chronological = [...data].reverse();
+
+                // Update Chart
+                const labels = chronological.map(r => formatPhtTime(r.time));
+                const n1Series = chronological.map(r => r.node1 ?? r.distance);
+                const n2Series = chronological.map(r => (r.node2 && r.node2 < 999) ? r.node2 : null);
+                const hasNode2 = n2Series.some(v => v !== null);
+
+                waterChart.data.labels = labels;
+                waterChart.data.datasets[0].data = n1Series;
+                waterChart.data.datasets[1].data = n2Series;
+                waterChart.data.datasets[1].hidden = !hasNode2;
+                waterChart.data.datasets[2].data = labels.map(() => 300);
+                waterChart.data.datasets[3].data = labels.map(() => 180);
+                waterChart.update('none');
+
+                // Latest Reading
+                const latest = data[0];
+                const prev = data.length > 1 ? data[1] : null;
+                const dist1 = latest.node1 ?? latest.distance ?? 999;
+
+                document.getElementById('node-distance').innerText = dist1 < 999 ? dist1 : '--';
+                document.getElementById('clearance-tag').innerText = dist1 < 999 ? `Clearance: ${dist1} cm` : 'Offline';
+                document.getElementById('beam-readout').innerText = dist1 < 999 ? `${dist1} cm to surface` : 'No echo';
+                document.getElementById('last-updated').innerText = 'Last updated: ' + formatPhtTime(latest.time);
+                document.getElementById('total-packets').innerText = `${data.length} Packets in View`;
+
+                if (latest.rssi != null && latest.snr != null) {
+                    document.getElementById('rf-metrics').innerText = `${latest.rssi.toFixed(0)} dBm | SNR ${latest.snr.toFixed(1)} dB`;
+                }
+
+                // Delta computation
+                if (prev && dist1 < 999 && (prev.node1 ?? prev.distance) < 999) {
+                    const prevDist = prev.node1 ?? prev.distance;
+                    const diff = dist1 - prevDist;
+                    const rateEl = document.getElementById('water-rise-rate');
+                    if (diff < 0) {
+                        rateEl.innerText = `▲ Water Rising (${Math.abs(diff)} cm closer)`;
+                        rateEl.style.color = '#f87171';
+                    } else if (diff > 0) {
+                        rateEl.innerText = `▼ Water Receding (+${diff} cm clearance)`;
+                        rateEl.style.color = '#34d399';
+                    } else {
+                        rateEl.innerText = '● Water Level Stable (0 cm delta)';
+                        rateEl.style.color = '#94a3b8';
+                    }
+                }
+
+                // Node 2 & Node 3
+                if (latest.node2 && latest.node2 < 999) {
+                    document.getElementById('node2-distance').innerText = `${latest.node2} cm`;
+                    document.getElementById('node2-status').innerText = 'Online • LoRa Hop';
+                } else {
+                    document.getElementById('node2-distance').innerText = 'STANDBY';
+                    document.getElementById('node2-status').innerText = 'Single-Node / Offline';
+                }
+
+                if (latest.node3 && latest.node3 < 999) {
+                    document.getElementById('node3-distance').innerText = `${latest.node3} cm`;
+                    document.getElementById('node3-status').innerText = 'Online • LoRa Hop';
+                } else {
+                    document.getElementById('node3-distance').innerText = 'STANDBY';
+                    document.getElementById('node3-status').innerText = 'Single-Node / Offline';
+                }
+
+                // Update River Cross-Section Water Fill Bar (0cm = 100% full, 400cm = 0% full)
+                const fillBar = document.getElementById('water-fill-bar');
+                const clampedDist = Math.max(0, Math.min(400, dist1));
+                const waterPct = Math.max(6, Math.min(96, ((400 - clampedDist) / 400) * 100));
+                fillBar.style.height = `${waterPct}%`;
+                fillBar.className = 'water-fill';
+                if (latest.mode === 2) fillBar.classList.add('warn');
+                if (latest.mode === 3) fillBar.classList.add('crit');
+
+                // Update Global Threat Banner & Hardware Relays
+                updateThreatUI(latest.mode, dist1);
+
+                // Update Recent Logs Table
+                renderLogTable(data.slice(0, 15));
+
+            } catch (error) {
+                console.error('Error fetching telemetry:', error);
+                document.getElementById('connection-text').innerText = 'RECONNECTING...';
+                document.getElementById('connection-dot').style.background = '#f59e0b';
+            }
+        }
+
+        function updateThreatUI(mode, dist) {
+            const banner = document.getElementById('threat-banner');
+            const badge = document.getElementById('threat-level');
+            const headline = document.getElementById('threat-headline');
+            const desc = document.getElementById('threat-desc');
+            const strobe = document.getElementById('relay-strobe');
+            const siren = document.getElementById('relay-siren');
+            const gsm = document.getElementById('gsm-status');
+
+            banner.className = `threat-banner mode-${mode}`;
+
+            if (mode === 1) {
+                badge.innerText = 'SAFE';
+                headline.innerText = 'Normal River Surface Clearance (≥ 300 cm)';
+                desc.innerText = 'All sentry nodes report safe water levels. Hardware strobe and siren relays remain off.';
+                strobe.innerText = '⚪ STANDBY (HIGH)';
+                siren.innerText = '⚪ STANDBY (HIGH)';
+                gsm.innerText = '🟢 MONITORING';
+            } else if (mode === 2) {
+                badge.innerText = 'WARNING';
+                headline.innerText = 'Rising Water Detected (180 – 299 cm Clearance)';
+                desc.innerText = 'River level has crossed the 300 cm warning threshold. Strobe beacon activated and advisory SMS queued.';
+                strobe.innerText = '🟡 ACTIVE STROBE (LOW)';
+                siren.innerText = '⚪ STANDBY (HIGH)';
+                gsm.innerText = '🟡 WARNING SMS SENT';
+            } else if (mode === 3) {
+                badge.innerText = 'CRITICAL ALERT';
+                headline.innerText = 'FLASH FLOOD DANGER (< 180 cm Clearance)';
+                desc.innerText = 'Critical water elevation reached! High-decibel siren and strobe relays engaged; evacuation SMS dispatched.';
+                strobe.innerText = '🔴 ENGAGED (LOW)';
+                siren.innerText = '🔴 SIREN ACTIVE (LOW)';
+                gsm.innerText = '🔴 EVACUATE SMS SENT';
+                playCriticalBeep();
+            }
+        }
+
+        function renderLogTable(rows) {
+            const tbody = document.getElementById('log-table-body');
+            tbody.innerHTML = rows.map(r => {
+                let badgeClass = 'badge-safe';
+                let badgeText = 'SAFE';
+                if (r.mode === 2) { badgeClass = 'badge-warn'; badgeText = 'WARN'; }
+                if (r.mode === 3) { badgeClass = 'badge-crit'; badgeText = 'CRIT'; }
+                const n1 = (r.node1 ?? r.distance) < 999 ? `${r.node1 ?? r.distance} cm` : '--';
+                const n2 = (r.node2 && r.node2 < 999) ? `${r.node2} cm` : '--';
+                const src = (r.source === 'simulation') ? 'SIM' : 'ESP32';
+                return `
+                    <tr>
+                        <td class="mono">${formatPhtTime(r.time)}</td>
+                        <td><span class="badge-sm ${badgeClass}">${badgeText}</span></td>
+                        <td class="mono">${n1}</td>
+                        <td class="mono">${n2}</td>
+                        <td class="mono" style="color:var(--text-secondary);">${src}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function setChartLimit(limit, btnEl) {
+            currentLimit = limit;
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            btnEl.classList.add('active');
+            fetchLatestData();
+        }
+
+        // --- 5. EMERGENCY SMS NUMBER MANAGEMENT ---
+        async function loadEmergencyNumber() {
+            try {
+                const res = await fetch('/api/numbers');
+                if (res.ok) {
+                    const data = await res.json();
+                    document.getElementById('sms-number-input').value = data.raw || '+639123456789';
+                }
+            } catch (e) {}
+        }
+
+        async function saveEmergencyNumber() {
+            const input = document.getElementById('sms-number-input');
+            const feedback = document.getElementById('sms-save-feedback');
+            try {
+                const res = await fetch('/api/numbers', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ numbers: input.value.trim() })
+                });
+                if (res.ok) {
+                    feedback.innerText = '✓ Saved for ESP32 SIM800L';
+                    feedback.style.color = '#34d399';
+                }
+            } catch (e) {
+                feedback.innerText = 'Failed to save';
+                feedback.style.color = '#f87171';
+            }
+        }
+
+        // --- 6. SIMULATION & CSV EXPORT ---
+        async function triggerPreset(scenario) {
+            await fetch('/api/simulate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ scenario })
+            });
+            document.getElementById('sim-modal').close();
+            fetchLatestData();
+        }
+
+        async function submitCustomSimulation() {
+            const n1 = parseInt(document.getElementById('sim-n1').value, 10) || 260;
+            const n2 = parseInt(document.getElementById('sim-n2').value, 10) || 999;
+            const n3 = parseInt(document.getElementById('sim-n3').value, 10) || 999;
+            await fetch('/api/simulate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ node1: n1, node2: n2, node3: n3 })
+            });
+            document.getElementById('sim-modal').close();
+            fetchLatestData();
+        }
+
+        function exportCSV() {
+            if (!cachedReadings.length) return;
+            const headers = ['ID', 'Timestamp_UTC', 'Threat_Mode', 'Node1_cm', 'Node2_cm', 'Node3_cm', 'RSSI_dBm', 'SNR_dB', 'Source'];
+            const rows = cachedReadings.map(r => [
+                r.id ?? '',
+                r.time,
+                r.mode,
+                r.node1 ?? r.distance,
+                r.node2 ?? 999,
+                r.node3 ?? 999,
+                r.rssi ?? '',
+                r.snr ?? '',
+                r.source ?? 'esp32'
+            ]);
+            const csv = [headers.join(','), ...rows.map(row => row.join(','))].join('\n');
+            const blob = new Blob([csv], { type: 'text/csv' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `riverguard_telemetry_${new Date().toISOString().slice(0,10)}.csv`;
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        // Initialize
+        loadEmergencyNumber();
+        fetchLatestData();
+        setInterval(fetchLatestData, 4000);
+    </script>
+</body>
+</html>
