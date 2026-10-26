@@ -129,6 +129,7 @@ def get_sqlite_connection():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
 
@@ -146,6 +147,33 @@ def init_db():
             conn = get_mysql_connection()
             with conn.cursor() as cursor:
                 cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS admins (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        username VARCHAR(80) NOT NULL UNIQUE,
+                        email VARCHAR(120) NOT NULL UNIQUE,
+                        password_hash VARCHAR(255) NOT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS registered_numbers (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        mobile_number VARCHAR(20) NOT NULL UNIQUE,
+                        full_name VARCHAR(120) DEFAULT '',
+                        location VARCHAR(160) DEFAULT '',
+                        additional_details VARCHAR(255) DEFAULT '',
+                        added_by_admin_id INT DEFAULT NULL,
+                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        CONSTRAINT fk_registered_numbers_admin
+                            FOREIGN KEY (added_by_admin_id) REFERENCES admins(id)
+                            ON DELETE SET NULL ON UPDATE CASCADE
+                    )
+                ''')
+                cursor.execute("SHOW COLUMNS FROM registered_numbers LIKE 'added_by_admin_id'")
+                if not cursor.fetchone():
+                    cursor.execute("ALTER TABLE registered_numbers ADD COLUMN added_by_admin_id INT DEFAULT NULL")
+
+                cursor.execute('''
                     CREATE TABLE IF NOT EXISTS node_states (
                         node_id INT PRIMARY KEY,
                         distance INT NOT NULL DEFAULT 999,
@@ -158,36 +186,22 @@ def init_db():
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS sensor_logs (
                         id INT AUTO_INCREMENT PRIMARY KEY,
+                        node_id INT DEFAULT NULL,
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                         global_mode INT NOT NULL DEFAULT 1,
                         node1_distance INT NOT NULL DEFAULT 999,
-                        nodes_json TEXT DEFAULT NULL
+                        nodes_json TEXT DEFAULT NULL,
+                        CONSTRAINT fk_sensor_logs_node
+                            FOREIGN KEY (node_id) REFERENCES node_states(node_id)
+                            ON DELETE SET NULL ON UPDATE CASCADE
                     )
                 ''')
-                # Ensure nodes_json exists if migrating from earlier MySQL schema
                 cursor.execute("SHOW COLUMNS FROM sensor_logs LIKE 'nodes_json'")
                 if not cursor.fetchone():
                     cursor.execute("ALTER TABLE sensor_logs ADD COLUMN nodes_json TEXT DEFAULT NULL")
-
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS registered_numbers (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        mobile_number VARCHAR(20) NOT NULL UNIQUE,
-                        full_name VARCHAR(120) DEFAULT '',
-                        location VARCHAR(160) DEFAULT '',
-                        additional_details VARCHAR(255) DEFAULT '',
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS admins (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        username VARCHAR(80) NOT NULL UNIQUE,
-                        email VARCHAR(120) NOT NULL UNIQUE,
-                        password_hash VARCHAR(255) NOT NULL,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
+                cursor.execute("SHOW COLUMNS FROM sensor_logs LIKE 'node_id'")
+                if not cursor.fetchone():
+                    cursor.execute("ALTER TABLE sensor_logs ADD COLUMN node_id INT DEFAULT NULL")
                 cursor.execute("SELECT COUNT(*) AS cnt FROM admins")
                 if cursor.fetchone()['cnt'] == 0:
                     cursor.execute('''
@@ -204,6 +218,33 @@ def init_db():
     cursor = conn.cursor()
 
     cursor.execute('''
+        CREATE TABLE IF NOT EXISTS admins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS registered_numbers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mobile_number TEXT NOT NULL UNIQUE,
+            full_name TEXT DEFAULT '',
+            location TEXT DEFAULT '',
+            additional_details TEXT DEFAULT '',
+            added_by_admin_id INTEGER DEFAULT NULL REFERENCES admins(id) ON DELETE SET NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    reg_cols = {
+        row['name'] for row in cursor.execute("PRAGMA table_info(registered_numbers)").fetchall()
+    }
+    if 'added_by_admin_id' not in reg_cols:
+        cursor.execute("ALTER TABLE registered_numbers ADD COLUMN added_by_admin_id INTEGER DEFAULT NULL")
+
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS node_states (
             node_id INTEGER PRIMARY KEY,
             distance INTEGER NOT NULL DEFAULT 999,
@@ -217,6 +258,7 @@ def init_db():
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sensor_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id INTEGER DEFAULT NULL REFERENCES node_states(node_id) ON DELETE SET NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             global_mode INTEGER,
             node1_distance INTEGER,
@@ -229,27 +271,8 @@ def init_db():
     }
     if 'nodes_json' not in existing_cols:
         cursor.execute("ALTER TABLE sensor_logs ADD COLUMN nodes_json TEXT DEFAULT NULL")
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS registered_numbers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            mobile_number TEXT NOT NULL UNIQUE,
-            full_name TEXT DEFAULT '',
-            location TEXT DEFAULT '',
-            additional_details TEXT DEFAULT '',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS admins (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL UNIQUE,
-            email TEXT NOT NULL UNIQUE,
-            password_hash TEXT NOT NULL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    if 'node_id' not in existing_cols:
+        cursor.execute("ALTER TABLE sensor_logs ADD COLUMN node_id INTEGER DEFAULT NULL")
 
     admin_count = cursor.execute("SELECT COUNT(*) FROM admins").fetchone()[0]
     if admin_count == 0:
@@ -409,12 +432,14 @@ def receive_hardware_data():
                     all_nodes = cursor.fetchall()
 
                     system_mode = int(raw_mode) if raw_mode is not None else compute_threat_mode(all_nodes)
-                    primary_dist = next((x['distance'] for x in all_nodes if x['id'] == 1), all_nodes[0]['distance'])
+                    primary_node_obj = next((x for x in all_nodes if x['id'] == 1), all_nodes[0])
+                    primary_dist = primary_node_obj['distance']
+                    primary_nid = primary_node_obj['id']
 
                     cursor.execute('''
-                        INSERT INTO sensor_logs (timestamp, global_mode, node1_distance, nodes_json)
-                        VALUES (%s, %s, %s, %s)
-                    ''', (utc_now_str, system_mode, primary_dist, json.dumps(all_nodes)))
+                        INSERT INTO sensor_logs (node_id, timestamp, global_mode, node1_distance, nodes_json)
+                        VALUES (%s, %s, %s, %s, %s)
+                    ''', (primary_nid, utc_now_str, system_mode, primary_dist, json.dumps(all_nodes)))
                 conn.commit()
             finally:
                 conn.close()
@@ -441,12 +466,14 @@ def receive_hardware_data():
                 all_nodes = [dict(r) for r in rows]
 
                 system_mode = int(raw_mode) if raw_mode is not None else compute_threat_mode(all_nodes)
-                primary_dist = next((x['distance'] for x in all_nodes if x['id'] == 1), all_nodes[0]['distance'])
+                primary_node_obj = next((x for x in all_nodes if x['id'] == 1), all_nodes[0])
+                primary_dist = primary_node_obj['distance']
+                primary_nid = primary_node_obj['id']
 
                 cursor.execute('''
-                    INSERT INTO sensor_logs (timestamp, global_mode, node1_distance, nodes_json)
-                    VALUES (?, ?, ?, ?)
-                ''', (utc_now_str, system_mode, primary_dist, json.dumps(all_nodes)))
+                    INSERT INTO sensor_logs (node_id, timestamp, global_mode, node1_distance, nodes_json)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (primary_nid, utc_now_str, system_mode, primary_dist, json.dumps(all_nodes)))
                 conn.commit()
             finally:
                 conn.close()
@@ -609,6 +636,7 @@ def register_mobile_number():
             return jsonify({"error": "Invalid Phone Number Format"}), 400
 
         utc_now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        admin_id_fk = session.get('admin_id') if session.get('admin_logged_in') else None
 
         if is_mysql_configured():
             conn = get_mysql_connection()
@@ -623,9 +651,9 @@ def register_mobile_number():
 
                     cursor.execute('''
                         INSERT INTO registered_numbers
-                        (mobile_number, full_name, location, additional_details, created_at)
-                        VALUES (%s, %s, %s, %s, %s)
-                    ''', (normalized_phone, full_name, location, additional_details, utc_now_str))
+                        (mobile_number, full_name, location, additional_details, added_by_admin_id, created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    ''', (normalized_phone, full_name, location, additional_details, admin_id_fk, utc_now_str))
                 conn.commit()
             finally:
                 conn.close()
@@ -641,9 +669,9 @@ def register_mobile_number():
 
                 conn.execute('''
                     INSERT INTO registered_numbers
-                    (mobile_number, full_name, location, additional_details, created_at)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (normalized_phone, full_name, location, additional_details, utc_now_str))
+                    (mobile_number, full_name, location, additional_details, added_by_admin_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (normalized_phone, full_name, location, additional_details, admin_id_fk, utc_now_str))
                 conn.commit()
             finally:
                 conn.close()
