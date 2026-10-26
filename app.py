@@ -2,6 +2,7 @@ import os
 import re
 import ssl
 import hmac
+import json
 import time
 import sqlite3
 import threading
@@ -28,8 +29,7 @@ CORS(app)
 
 db_path = os.path.join(app.root_path, 'river.db')
 
-# Shared API key between ESP32 Main Gateway and Flask Server
-# Override GATEWAY_API_KEY in Render Environment Variables for production!
+# Must match gatewayApiKey in Main_Node_Fin03.ino (override via GATEWAY_API_KEY in Render)
 DEFAULT_GATEWAY_KEY = 'rg-gateway-2026-key'
 
 # =========================================================
@@ -56,7 +56,6 @@ def gateway_key_required(f):
     def decorated(*args, **kwargs):
         expected_key = get_gateway_api_key()
 
-        # Check X-API-Key header first (recommended), then Authorization: Bearer, then form/JSON/query fallback
         provided_key = request.headers.get('X-API-Key', '').strip()
         if not provided_key:
             auth_header = request.headers.get('Authorization', '').strip()
@@ -134,7 +133,7 @@ def get_sqlite_connection():
 
 
 # =========================================================
-# 1. INITIALIZE DATABASE (Sensor Logs, Registered Numbers, Admins)
+# 1. INITIALIZE DATABASE
 # =========================================================
 def init_db():
     default_admin_user = os.getenv('ADMIN_USERNAME', 'admin')
@@ -147,15 +146,29 @@ def init_db():
             conn = get_mysql_connection()
             with conn.cursor() as cursor:
                 cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS node_states (
+                        node_id INT PRIMARY KEY,
+                        distance INT NOT NULL DEFAULT 999,
+                        battery INT NOT NULL DEFAULT 100,
+                        rssi INT DEFAULT NULL,
+                        status VARCHAR(16) NOT NULL DEFAULT 'ONLINE',
+                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                cursor.execute('''
                     CREATE TABLE IF NOT EXISTS sensor_logs (
                         id INT AUTO_INCREMENT PRIMARY KEY,
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                         global_mode INT NOT NULL DEFAULT 1,
                         node1_distance INT NOT NULL DEFAULT 999,
-                        node2_distance INT DEFAULT 999,
-                        node3_distance INT DEFAULT 999
+                        nodes_json TEXT DEFAULT NULL
                     )
                 ''')
+                # Ensure nodes_json exists if migrating from earlier MySQL schema
+                cursor.execute("SHOW COLUMNS FROM sensor_logs LIKE 'nodes_json'")
+                if not cursor.fetchone():
+                    cursor.execute("ALTER TABLE sensor_logs ADD COLUMN nodes_json TEXT DEFAULT NULL")
+
                 cursor.execute('''
                     CREATE TABLE IF NOT EXISTS registered_numbers (
                         id INT AUTO_INCREMENT PRIMARY KEY,
@@ -189,24 +202,33 @@ def init_db():
 
     conn = get_sqlite_connection()
     cursor = conn.cursor()
+
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS node_states (
+            node_id INTEGER PRIMARY KEY,
+            distance INTEGER NOT NULL DEFAULT 999,
+            battery INTEGER NOT NULL DEFAULT 100,
+            rssi INTEGER DEFAULT NULL,
+            status TEXT NOT NULL DEFAULT 'ONLINE',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS sensor_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             global_mode INTEGER,
             node1_distance INTEGER,
-            node2_distance INTEGER DEFAULT 999,
-            node3_distance INTEGER DEFAULT 999
+            nodes_json TEXT DEFAULT NULL
         )
     ''')
 
     existing_cols = {
         row['name'] for row in cursor.execute("PRAGMA table_info(sensor_logs)").fetchall()
     }
-    if 'node2_distance' not in existing_cols:
-        cursor.execute("ALTER TABLE sensor_logs ADD COLUMN node2_distance INTEGER DEFAULT 999")
-    if 'node3_distance' not in existing_cols:
-        cursor.execute("ALTER TABLE sensor_logs ADD COLUMN node3_distance INTEGER DEFAULT 999")
+    if 'nodes_json' not in existing_cols:
+        cursor.execute("ALTER TABLE sensor_logs ADD COLUMN nodes_json TEXT DEFAULT NULL")
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS registered_numbers (
@@ -252,15 +274,22 @@ def admin_required(f):
     return decorated
 
 
-def compute_threat_mode(distances):
-    """Auto-computes threat level if ESP32 omits explicit mode/threat field."""
+def compute_threat_mode(nodes_list):
+    """
+    Matches Main_Node_Fin03.ino updateGlobalThreatLevel():
+    - Only considers ONLINE nodes
+    - 1..179 cm   -> Mode 3 (CRITICAL)
+    - 180..300 cm -> Mode 2 (WARNING)
+    - > 300 cm    -> Mode 1 (SAFE)
+    """
     highest = 1
-    for d in distances:
-        if d is None:
+    for n in nodes_list:
+        if str(n.get('status', 'ONLINE')).upper() == 'OFFLINE':
             continue
-        if 0 < d < 180:
+        d = int(n.get('distance', 999))
+        if 0 < d <= 179:
             return 3
-        elif 180 <= d < 300 and highest < 3:
+        elif 180 <= d <= 300 and highest < 3:
             highest = 2
     return highest
 
@@ -292,9 +321,13 @@ def validate_and_normalize_phone(raw_number):
 def receive_hardware_data():
     """
     Receives real sensor telemetry from the ESP32 Main Gateway (protected by X-API-Key).
-    Compatible with both JSON and form-urlencoded payloads and 1-3 soldier nodes:
-      - JSON: {"node_1": 250, "node_2": 310, "node_3": 999, "threat": 2}
-      - Form: mode=2&node1=250&node2=310
+    Supports:
+      1. Main_Node_Fin03 combined JSON:
+         {"mode": 1, "nodes": [{"id": 1, "distance": 320, "battery": 95, "rssi": -68, "status": "ONLINE"}, ...]}
+      2. Main_Node_Fin02 per-node form POST:
+         mode=1&node_id=1&distance=320&battery=95&status=ONLINE
+      3. Legacy form/JSON:
+         mode=1&node1=320
     """
     try:
         payload = {}
@@ -305,22 +338,51 @@ def receive_hardware_data():
         else:
             payload = request.get_json(force=True, silent=True) or {}
 
-        raw_mode = payload.get('mode', payload.get('threat', payload.get('global_mode')))
-        raw_n1 = payload.get('node1', payload.get('node_1', payload.get('distance')))
-        raw_n2 = payload.get('node2', payload.get('node_2', 999))
-        raw_n3 = payload.get('node3', payload.get('node_3', 999))
+        incoming_nodes = []
+        raw_mode = payload.get('mode', payload.get('threat'))
 
-        if raw_n1 is None and raw_mode is None:
-            return jsonify({"error": "Missing sensor node or threat mode data"}), 400
+        if isinstance(payload.get('nodes'), list):
+            for item in payload['nodes']:
+                nid = int(item.get('id', item.get('node_id', 1)))
+                if 1 <= nid <= 9:
+                    incoming_nodes.append({
+                        "id": nid,
+                        "distance": int(float(item.get('distance', 999))),
+                        "battery": int(float(item.get('battery', 100))),
+                        "rssi": int(float(item['rssi'])) if item.get('rssi') is not None else None,
+                        "status": str(item.get('status', 'ONLINE')).upper()
+                    })
+        elif 'node_id' in payload:
+            nid = int(payload['node_id'])
+            incoming_nodes.append({
+                "id": nid,
+                "distance": int(float(payload.get('distance', 999))),
+                "battery": int(float(payload.get('battery', 100))),
+                "rssi": int(float(payload['rssi'])) if payload.get('rssi') is not None else None,
+                "status": str(payload.get('status', 'ONLINE')).upper()
+            })
+        elif 'node1' in payload or 'node_1' in payload:
+            d1 = int(float(payload.get('node1', payload.get('node_1', 999))))
+            incoming_nodes.append({
+                "id": 1,
+                "distance": d1,
+                "battery": 100,
+                "rssi": None,
+                "status": "ONLINE"
+            })
+            if payload.get('node2') or payload.get('node_2'):
+                d2 = int(float(payload.get('node2', payload.get('node_2', 999))))
+                if d2 < 999:
+                    incoming_nodes.append({
+                        "id": 2,
+                        "distance": d2,
+                        "battery": 100,
+                        "rssi": None,
+                        "status": "ONLINE"
+                    })
 
-        node1_dist = int(float(raw_n1)) if raw_n1 is not None else 999
-        node2_dist = int(float(raw_n2)) if raw_n2 is not None else 999
-        node3_dist = int(float(raw_n3)) if raw_n3 is not None else 999
-
-        if raw_mode is not None:
-            system_mode = int(raw_mode)
-        else:
-            system_mode = compute_threat_mode([node1_dist, node2_dist, node3_dist])
+        if not incoming_nodes:
+            return jsonify({"error": "No valid node telemetry provided"}), 400
 
         utc_now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
@@ -328,22 +390,63 @@ def receive_hardware_data():
             conn = get_mysql_connection()
             try:
                 with conn.cursor() as cursor:
+                    for n in incoming_nodes:
+                        cursor.execute('''
+                            INSERT INTO node_states (node_id, distance, battery, rssi, status, updated_at)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                            ON DUPLICATE KEY UPDATE
+                                distance = VALUES(distance),
+                                battery = VALUES(battery),
+                                rssi = VALUES(rssi),
+                                status = VALUES(status),
+                                updated_at = VALUES(updated_at)
+                        ''', (n['id'], n['distance'], n['battery'], n['rssi'], n['status'], utc_now_str))
+
                     cursor.execute('''
-                        INSERT INTO sensor_logs
-                        (timestamp, global_mode, node1_distance, node2_distance, node3_distance)
-                        VALUES (%s, %s, %s, %s, %s)
-                    ''', (utc_now_str, system_mode, node1_dist, node2_dist, node3_dist))
+                        SELECT node_id AS id, distance, battery, rssi, status
+                        FROM node_states ORDER BY node_id ASC
+                    ''')
+                    all_nodes = cursor.fetchall()
+
+                    system_mode = int(raw_mode) if raw_mode is not None else compute_threat_mode(all_nodes)
+                    primary_dist = next((x['distance'] for x in all_nodes if x['id'] == 1), all_nodes[0]['distance'])
+
+                    cursor.execute('''
+                        INSERT INTO sensor_logs (timestamp, global_mode, node1_distance, nodes_json)
+                        VALUES (%s, %s, %s, %s)
+                    ''', (utc_now_str, system_mode, primary_dist, json.dumps(all_nodes)))
                 conn.commit()
             finally:
                 conn.close()
         else:
             conn = get_sqlite_connection()
             try:
-                conn.execute('''
-                    INSERT INTO sensor_logs
-                    (timestamp, global_mode, node1_distance, node2_distance, node3_distance)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', (utc_now_str, system_mode, node1_dist, node2_dist, node3_dist))
+                cursor = conn.cursor()
+                for n in incoming_nodes:
+                    cursor.execute('''
+                        INSERT INTO node_states (node_id, distance, battery, rssi, status, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(node_id) DO UPDATE SET
+                            distance = excluded.distance,
+                            battery = excluded.battery,
+                            rssi = excluded.rssi,
+                            status = excluded.status,
+                            updated_at = excluded.updated_at
+                    ''', (n['id'], n['distance'], n['battery'], n['rssi'], n['status'], utc_now_str))
+
+                rows = cursor.execute('''
+                    SELECT node_id AS id, distance, battery, rssi, status
+                    FROM node_states ORDER BY node_id ASC
+                ''').fetchall()
+                all_nodes = [dict(r) for r in rows]
+
+                system_mode = int(raw_mode) if raw_mode is not None else compute_threat_mode(all_nodes)
+                primary_dist = next((x['distance'] for x in all_nodes if x['id'] == 1), all_nodes[0]['distance'])
+
+                cursor.execute('''
+                    INSERT INTO sensor_logs (timestamp, global_mode, node1_distance, nodes_json)
+                    VALUES (?, ?, ?, ?)
+                ''', (utc_now_str, system_mode, primary_dist, json.dumps(all_nodes)))
                 conn.commit()
             finally:
                 conn.close()
@@ -363,7 +466,7 @@ def receive_hardware_data():
 # =========================================================
 @app.route('/api/get_latest', methods=['GET'])
 def get_latest_data():
-    """Returns latest 20 real gateway readings (empty list if gateway hasn't sent data yet)."""
+    """Returns latest 20 real gateway snapshots (empty list if gateway hasn't sent data yet)."""
     try:
         now = time.time()
         with _cache_lock:
@@ -375,7 +478,7 @@ def get_latest_data():
             try:
                 with conn.cursor() as cursor:
                     cursor.execute('''
-                        SELECT timestamp, global_mode, node1_distance, node2_distance, node3_distance
+                        SELECT timestamp, global_mode, node1_distance, nodes_json
                         FROM sensor_logs
                         ORDER BY id DESC LIMIT 20
                     ''')
@@ -387,7 +490,7 @@ def get_latest_data():
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT timestamp, global_mode, node1_distance, node2_distance, node3_distance
+                    SELECT timestamp, global_mode, node1_distance, nodes_json
                     FROM sensor_logs
                     ORDER BY id DESC LIMIT 20
                 ''')
@@ -400,15 +503,22 @@ def get_latest_data():
             ts_val = r['timestamp']
             ts_str = ts_val.strftime('%Y-%m-%d %H:%M:%S') if isinstance(ts_val, datetime) else str(ts_val)
             n1 = int(r['node1_distance']) if r['node1_distance'] is not None else 999
-            n2 = int(r['node2_distance']) if r.get('node2_distance') is not None else 999
-            n3 = int(r['node3_distance']) if r.get('node3_distance') is not None else 999
+
+            parsed_nodes = []
+            if r.get('nodes_json'):
+                try:
+                    parsed_nodes = json.loads(r['nodes_json'])
+                except Exception:
+                    parsed_nodes = []
+
+            if not parsed_nodes:
+                parsed_nodes = [{"id": 1, "distance": n1, "battery": 100, "rssi": None, "status": "ONLINE"}]
+
             data.append({
                 "time": ts_str,
                 "mode": int(r['global_mode']),
                 "distance": n1,
-                "node1": n1,
-                "node2": n2,
-                "node3": n3
+                "nodes": parsed_nodes
             })
 
         with _cache_lock:
@@ -428,9 +538,8 @@ def get_latest_data():
 @gateway_key_required
 def get_numbers():
     """
-    Returns active registered mobile numbers for the ESP32 SIM800L module (protected by X-API-Key).
-    - Default response: plain-text comma-separated (+639171111111,+639182222222)
-    - Optional ?format=json response: {"numbers": ["+639171111111", ...], "count": N}
+    Returns active registered mobile numbers for Main_Node_Fin03 SIM800L (protected by X-API-Key).
+    Plain-text comma-separated: +639171111111,+639182222222 (or empty string if none).
     """
     try:
         if is_mysql_configured():

@@ -86,7 +86,7 @@
             padding: 9px 16px;
             border-radius: 8px;
             cursor: pointer;
-            transition: background-color 0.2s ease, opacity 0.2s ease;
+            transition: background-color 0.2s ease;
             border: 1px solid transparent;
         }
 
@@ -174,17 +174,41 @@
 
         /* Distance Readout Styles */
         .distance-readout {
-            font-size: 3.8em;
+            font-size: 3.6em;
             font-weight: bold;
             color: var(--accent-cyan);
-            margin: 10px 0;
+            margin: 10px 0 6px 0;
         }
 
-        .secondary-node {
-            font-size: 0.95em;
-            color: #b0bec5;
-            margin-top: 4px;
-            display: none;
+        .nodes-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 10px;
+            text-align: left;
+        }
+
+        .node-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #161616;
+            border: 1px solid #2b2b2b;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 0.9rem;
+        }
+
+        .node-status-online {
+            color: #2ecc71;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .node-status-offline {
+            color: #e74c3c;
+            font-size: 0.8rem;
+            font-weight: 600;
         }
 
         /* Chart Container */
@@ -279,7 +303,6 @@
             background-color: #a93226;
         }
 
-        /* Responsive Design for Phones */
         @media (max-width: 768px) {
             .dashboard-grid { grid-template-columns: 1fr; }
             .top-header { flex-direction: column; align-items: flex-start; }
@@ -319,10 +342,10 @@
         </div>
 
         <div class="card">
-            <h3>Sensor Water Distance (Main Gateway)</h3>
+            <h3>Sensor Readings (Main Gateway)</h3>
             <div id="node-distance" class="distance-readout">-- cm</div>
-            <div id="node2-distance" class="secondary-node">Node 2: -- cm</div>
-            <p id="last-updated" style="color: #888; font-size: 0.9em; margin-top: 12px;">
+            <div id="nodes-container" class="nodes-list" style="display: none;"></div>
+            <p id="last-updated" style="color: #888; font-size: 0.88em; margin-top: 12px; margin-bottom: 0;">
                 Last updated: Waiting for data...
             </p>
         </div>
@@ -371,6 +394,14 @@
     {% endif %}
 
     <script>
+        const NODE_COLORS = [
+            { border: '#34dbcc', bg: 'rgba(52, 219, 204, 0.18)' },
+            { border: '#3498db', bg: 'rgba(52, 152, 219, 0.12)' },
+            { border: '#9b59b6', bg: 'rgba(155, 89, 182, 0.12)' },
+            { border: '#f1c40f', bg: 'rgba(241, 196, 15, 0.12)' },
+            { border: '#e67e22', bg: 'rgba(230, 126, 34, 0.12)' }
+        ];
+
         // --- 1. INITIALIZE CHART.JS ---
         const ctx = document.getElementById('waterChart').getContext('2d');
         const waterChart = new Chart(ctx, {
@@ -381,7 +412,7 @@
                     label: 'Water Distance (cm)',
                     data: [],
                     borderColor: '#34dbcc',
-                    backgroundColor: 'rgba(52, 219, 204, 0.2)',
+                    backgroundColor: 'rgba(52, 219, 204, 0.18)',
                     borderWidth: 3,
                     pointRadius: 4,
                     fill: true,
@@ -393,7 +424,7 @@
                 scales: {
                     y: {
                         beginAtZero: true,
-                        max: 400,
+                        max: 450,
                         grid: { color: '#333' },
                         ticks: { color: '#aaa' },
                         title: { display: true, text: 'Distance to Water (cm)', color: '#fff' }
@@ -423,33 +454,78 @@
 
                 if (Array.isArray(data) && data.length > 0) {
                     const reversedData = [...data].reverse();
+                    const latestReading = reversedData[reversedData.length - 1];
+                    const activeNodes = Array.isArray(latestReading.nodes) ? latestReading.nodes : [];
 
-                    const newLabels = reversedData.map(row => {
-                        return parseUtcDate(row.time).toLocaleTimeString([], { hour12: false });
+                    // Build chart labels
+                    const newLabels = reversedData.map(row =>
+                        parseUtcDate(row.time).toLocaleTimeString([], { hour12: false })
+                    );
+
+                    // Collect all discovered node IDs across history
+                    const nodeIdSet = new Set();
+                    reversedData.forEach(row => {
+                        if (Array.isArray(row.nodes)) {
+                            row.nodes.forEach(n => nodeIdSet.add(n.id));
+                        }
                     });
-                    const newDistances = reversedData.map(row => row.distance);
+                    const nodeIds = Array.from(nodeIdSet).sort((a, b) => a - b);
+
+                    if (nodeIds.length > 0) {
+                        waterChart.data.datasets = nodeIds.map((nid, idx) => {
+                            const palette = NODE_COLORS[idx % NODE_COLORS.length];
+                            return {
+                                label: `Node ${nid} Distance (cm)`,
+                                data: reversedData.map(row => {
+                                    const match = (row.nodes || []).find(n => n.id === nid);
+                                    return (match && match.distance < 999) ? match.distance : null;
+                                }),
+                                borderColor: palette.border,
+                                backgroundColor: palette.bg,
+                                borderWidth: 3,
+                                pointRadius: 4,
+                                fill: idx === 0,
+                                spanGaps: true,
+                                tension: 0.4
+                            };
+                        });
+                    } else {
+                        waterChart.data.datasets[0].data = reversedData.map(r => r.distance < 999 ? r.distance : null);
+                    }
 
                     waterChart.data.labels = newLabels;
-                    waterChart.data.datasets[0].data = newDistances;
                     waterChart.update();
 
-                    const latestReading = reversedData[reversedData.length - 1];
-                    document.getElementById('node-distance').innerText =
-                        (latestReading.distance < 999 ? latestReading.distance : '--') + ' cm';
+                    // Render Sensor Readings Card
+                    const mainReadout = document.getElementById('node-distance');
+                    const nodesContainer = document.getElementById('nodes-container');
 
-                    const node2El = document.getElementById('node2-distance');
-                    const extraNodes = [];
-                    if (latestReading.node2 && latestReading.node2 < 999) {
-                        extraNodes.push('Node 2: ' + latestReading.node2 + ' cm');
-                    }
-                    if (latestReading.node3 && latestReading.node3 < 999) {
-                        extraNodes.push('Node 3: ' + latestReading.node3 + ' cm');
-                    }
-                    if (extraNodes.length > 0) {
-                        node2El.style.display = 'block';
-                        node2El.innerText = extraNodes.join('  |  ');
+                    if (activeNodes.length <= 1) {
+                        const n = activeNodes[0] || { id: 1, distance: latestReading.distance, battery: 100, status: 'ONLINE' };
+                        mainReadout.style.display = 'block';
+                        mainReadout.innerText = (n.distance < 999 ? n.distance : '--') + ' cm';
+                        nodesContainer.style.display = 'flex';
+                        const isOff = String(n.status).toUpperCase() === 'OFFLINE';
+                        nodesContainer.innerHTML = `
+                            <div class="node-row">
+                                <span><strong>Node ${n.id}</strong> &bull; Bat: ${n.battery ?? 100}%</span>
+                                <span class="${isOff ? 'node-status-offline' : 'node-status-online'}">${isOff ? 'OFFLINE' : 'ONLINE'}</span>
+                            </div>
+                        `;
                     } else {
-                        node2El.style.display = 'none';
+                        // Multiple discovered Soldier Nodes: show clean per-node rows
+                        mainReadout.style.display = 'none';
+                        nodesContainer.style.display = 'flex';
+                        nodesContainer.innerHTML = activeNodes.map(n => {
+                            const isOff = String(n.status).toUpperCase() === 'OFFLINE';
+                            const distTxt = n.distance < 999 ? `${n.distance} cm` : 'Out of Range';
+                            return `
+                                <div class="node-row">
+                                    <span><strong>Node ${n.id}:</strong> <span style="color:#34dbcc; font-weight:700;">${distTxt}</span></span>
+                                    <span>Bat: ${n.battery ?? 100}% &bull; <span class="${isOff ? 'node-status-offline' : 'node-status-online'}">${isOff ? 'OFFLINE' : 'ONLINE'}</span></span>
+                                </div>
+                            `;
+                        }).join('');
                     }
 
                     const localTime = parseUtcDate(latestReading.time).toLocaleString();
