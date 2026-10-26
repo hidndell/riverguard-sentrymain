@@ -7,8 +7,13 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
-      - key: EMERGENCY_NUMBERS
-        value: "+639123456789"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_USERNAME
+        value: admin
+      - key: ADMIN_EMAIL
+        value: admin@riverguard.com
+      - key: ADMIN_PASSWORD
+        value: riverguard2026
       - key: DATABASE_URL
         sync: false
-

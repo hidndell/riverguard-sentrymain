@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register Mobile Number | RiverGuard</title>
+    <style>
+        :root {
+            --accent-blue: #3498db;
+            --accent-cyan: #34dbcc;
+            --safe-color: #27ae60;
+            --crit-color: #c0392b;
+            --bg-dark: #121212;
+            --card-dark: #1e1e1e;
+            --border-dark: #2c2c2c;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-dark);
+            color: #ffffff;
+            margin: 0;
+            padding: 24px 16px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .page-wrap {
+            width: 100%;
+            max-width: 560px;
+        }
+
+        .back-link {
+            display: inline-block;
+            color: #aaa;
+            text-decoration: none;
+            font-size: 0.9rem;
+            margin-bottom: 16px;
+        }
+
+        .back-link:hover {
+            color: #fff;
+        }
+
+        .card {
+            background-color: var(--card-dark);
+            border: 1px solid var(--border-dark);
+            border-radius: 12px;
+            padding: 28px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.35);
+        }
+
+        h1 {
+            color: var(--accent-blue);
+            font-size: 1.5rem;
+            margin: 0 0 6px 0;
+        }
+
+        .subtitle {
+            color: #999;
+            font-size: 0.9rem;
+            margin: 0 0 20px 0;
+        }
+
+        /* Data Privacy Policy Box */
+        .privacy-box {
+            background-color: #16202a;
+            border: 1px solid rgba(52, 152, 219, 0.4);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 22px;
+            font-size: 0.88rem;
+            line-height: 1.55;
+            color: #d6eaf8;
+        }
+
+        .privacy-box h4 {
+            margin: 0 0 8px 0;
+            color: var(--accent-cyan);
+            font-size: 0.95rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .alert {
+            display: none;
+            padding: 12px 14px;
+            border-radius: 8px;
+            margin-bottom: 18px;
+            font-size: 0.92rem;
+            font-weight: 600;
+        }
+
+        .alert.success {
+            display: block;
+            background: rgba(39, 174, 96, 0.2);
+            border: 1px solid var(--safe-color);
+            color: #69f0ae;
+        }
+
+        .alert.error {
+            display: block;
+            background: rgba(192, 57, 43, 0.2);
+            border: 1px solid var(--crit-color);
+            color: #ff8a80;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        label {
+            display: block;
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: #e0e0e0;
+        }
+
+        .optional-tag {
+            font-weight: 400;
+            color: #888;
+            font-size: 0.82rem;
+        }
+
+        .required-star {
+            color: #ff6b6b;
+        }
+
+        input[type="text"],
+        input[type="tel"],
+        textarea {
+            width: 100%;
+            padding: 11px 12px;
+            border-radius: 8px;
+            border: 1px solid #3a3a3a;
+            background-color: #141414;
+            color: #ffffff;
+            font-size: 0.95rem;
+            font-family: inherit;
+        }
+
+        input:focus,
+        textarea:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .field-hint {
+            font-size: 0.78rem;
+            color: #888;
+            margin-top: 5px;
+        }
+
+        .consent-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            margin: 18px 0 22px 0;
+            font-size: 0.86rem;
+            color: #ccc;
+        }
+
+        .consent-row input[type="checkbox"] {
+            margin-top: 3px;
+            transform: scale(1.15);
+            cursor: pointer;
+        }
+
+        .btn-submit {
+            width: 100%;
+            padding: 12px;
+            background-color: var(--accent-blue);
+            color: #ffffff;
+            border: none;
+            border-radius: 8px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        .btn-submit:hover {
+            background-color: #2980b9;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="page-wrap">
+        <a href="/" class="back-link">&larr; Back to Water Monitoring Dashboard</a>
+
+        <div class="card">
+            <h1>SMS Alert Registry</h1>
+            <p class="subtitle">Register your SIM card number to receive automated flood SMS warnings from RiverGuard.</p>
+
+            <!-- Data Privacy Policy Notice -->
+            <div class="privacy-box">
+                <h4>Data Privacy Policy</h4>
+                <p style="margin: 0;">
+                    Any SIM card numbers and optional personal details gathered through this registry are collected
+                    <strong>for the sole purpose of having data for the RiverGuard system in preparation for our Final Defense</strong>.
+                    Your information will be kept confidential and <strong>will be permanently destroyed once the researchers are allowed upon completion</strong> of the capstone project.
+                </p>
+            </div>
+
+            <div id="status-alert" class="alert" role="alert"></div>
+
+            <form id="register-form" novalidate>
+                <div class="form-group">
+                    <label for="mobile_number">
+                        SIM Card / Mobile Number <span class="required-star">*</span>
+                    </label>
+                    <input
+                        type="tel"
+                        id="mobile_number"
+                        name="mobile_number"
+                        placeholder="09123456789 or +639123456789"
+                        required
+                    >
+                    <div class="field-hint">Enter an active Philippine SIM number without spaces (e.g., 09123456789).</div>
+                </div>
+
+                <hr style="border: 0; border-top: 1px solid #2c2c2c; margin: 20px 0;">
+
+                <div class="form-group">
+                    <label for="full_name">
+                        Full Name <span class="optional-tag">(Optional)</span>
+                    </label>
+                    <input
+                        type="text"
+                        id="full_name"
+                        name="full_name"
+                        placeholder="e.g., Juan Dela Cruz"
+                    >
+                </div>
+
+                <div class="form-group">
+                    <label for="location">
+                        Barangay / Zone / Address <span class="optional-tag">(Optional)</span>
+                    </label>
+                    <input
+                        type="text"
+                        id="location"
+                        name="location"
+                        placeholder="e.g., Brgy. San Roque, Riverside Zone 2"
+                    >
+                </div>
+
+                <div class="form-group">
+                    <label for="additional_details">
+                        Additional Details <span class="optional-tag">(Optional)</span>
+                    </label>
+                    <textarea
+                        id="additional_details"
+                        name="additional_details"
+                        rows="2"
+                        placeholder="e.g., Resident / Barangay Tanod / Household Contact"
+                    ></textarea>
+                </div>
+
+                <label class="consent-row" for="privacy_consent">
+                    <input type="checkbox" id="privacy_consent" name="privacy_consent" required>
+                    <span>
+                        I have read and agree to the <strong>Data Privacy Policy</strong> above and consent to the temporary use of my SIM number for the RiverGuard Final Defense.
+                    </span>
+                </label>
+
+                <button type="submit" class="btn-submit">Submit / Register</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('register-form');
+        const alertBox = document.getElementById('status-alert');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            alertBox.className = 'alert';
+            alertBox.innerText = '';
+
+            const privacyChecked = document.getElementById('privacy_consent').checked;
+            if (!privacyChecked) {
+                alertBox.className = 'alert error';
+                alertBox.innerText = 'Please agree to the Data Privacy Policy before registering.';
+                return;
+            }
+
+            const payload = {
+                mobile_number: document.getElementById('mobile_number').value,
+                full_name: document.getElementById('full_name').value,
+                location: document.getElementById('location').value,
+                additional_details: document.getElementById('additional_details').value,
+                privacy_consent: privacyChecked
+            };
+
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+
+                if (res.ok) {
+                    alertBox.className = 'alert success';
+                    alertBox.innerText = data.message || 'Registration Successful';
+                    form.reset();
+                } else {
+                    alertBox.className = 'alert error';
+                    alertBox.innerText = data.error || 'Registration failed.';
+                }
+            } catch (err) {
+                alertBox.className = 'alert error';
+                alertBox.innerText = 'Network error. Please try again.';
+            }
+        });
+    </script>
+
+</body>
+</html>

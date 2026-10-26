@@ -1,32 +1,33 @@
-# RiverGuard Sentry System — Live Cloud Dashboard & Gateway API
+# RiverGuard Sentry System — Web Application
 
-Autonomous **LoRa 915 MHz Mesh Flood Detection & Early Warning System** powered by ESP32, SX1262, JSN-SR04T ultrasonic sensors, and SIM800L GSM dispatch.
+Web dashboard and SMS registry for the **RiverGuard Autonomous LoRa Mesh Flood Detection Network**, aligned strictly with the system Use Case Diagram and Use Case Narratives.
 
-## Features
-- **High-Concurrency Flask + Gunicorn Backend**: Thread-safe in-memory telemetry cache with **Cloud MySQL / TiDB Serverless** support (`DATABASE_URL`) and automatic **SQLite WAL** fallback so dozens of simultaneous users can view live flood telemetry without database lock contention.
-- **Dual ESP32 Firmware Compatibility (`/api/upload`)**:
-  - **Form-Urlencoded (`Pre_Oral_defense`)**: `mode=1&node1=320`
-  - **JSON Multi-Node (`Final_Defense`)**: `{"node_1": 320, "node_2": 340, "threat": 1}`
-- **Live Command-Center Dashboard (`/`)**:
-  - Global Threat Level Banner (`SAFE ≥ 300 cm`, `WARNING 180–299 cm`, `CRITICAL < 180 cm`)
-  - Hardware Relay Indicators (Strobe Pin 26, Siren Pin 27, SIM800L GSM)
-  - Live River Cross-Section Clearance Gauge & Rate-of-Rise Delta
-  - Real-Time Chart.js Trend with Threshold Markers & CSV Export
-  - Dynamic Emergency SMS Number Manager (`/api/get_numbers` & `/api/numbers`)
-  - Built-in **Defense Simulator** (`/api/simulate`) for live testing without hardware
+## System Use Cases
+1. **View Water Monitoring (`/`)**:
+   - Accessible immediately to General Users and Administrators.
+   - Displays live threat level and graphical water-distance readings transmitted by the ESP32 Main Gateway (`/api/upload`), refreshing every 5 seconds (`/api/get_latest`).
+   - Uses zero mock data — shows `WAITING FOR GATEWAY` until actual hardware transmissions are received.
+2. **Register Mobile Number (`/register`)**:
+   - Accessible via the **Register** button next to **Admin Login**.
+   - Displays the Capstone Final Defense **Data Privacy Policy** and collects a required Philippine SIM card number (`09XXXXXXXXX` or `+639XXXXXXXXX`) plus optional Name, Location/Barangay, and Additional Details.
+   - Validates phone format (`Invalid Phone Number Format`), prevents duplicates (`Number Already Registered`), confirms registration (`Registration Successful`), and exposes registered numbers to the SIM800L gateway via `/api/get_numbers`.
+3. **Administrator Log In (`/login`)**:
+   - Authenticates pre-registered administrator username/email and password against database records (`Incorrect Username or password` on invalid credentials).
+4. **View & Delete Registered Numbers (`/`, Admin Directory)**:
+   - Logged-in administrators can view all gathered SIM numbers, names, and optional details, and delete entries with confirmation (`DELETE /api/admin/numbers/<id>`).
+5. **Administrator Log Out (`/logout`)**:
+   - Immediately destroys the active session and redirects to the home dashboard.
 
 ---
 
 ## Deploying on Render (Same Workflow as BriquetteTrack)
 
-1. Go to [Render Dashboard](https://dashboard.render.com/) and click **New +** -> **Blueprint** (or **Web Service**).
-2. Connect your GitHub repository: `https://github.com/hidndell/riverguard-sentrymain`.
-3. Render automatically detects `render.yaml` / `Procfile`:
+1. In [Render Dashboard](https://dashboard.render.com/), create a **Blueprint** or **Web Service** connected to `https://github.com/hidndell/riverguard-sentrymain`.
+2. Build & Start commands (configured automatically via `render.yaml` / `Procfile`):
    - **Build Command**: `pip install -r requirements.txt`
    - **Start Command**: `gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 60`
-4. *(Optional — For Persistent Cloud Database across redeploys)*:
-   - Add `DATABASE_URL` in Render **Environment Variables** pointing to your **TiDB Cloud Serverless** or **Aiven MySQL** connection string (`mysql://user:pass@host:4000/riverguard_db`).
-   - If `DATABASE_URL` is omitted, the app automatically runs on high-concurrency **SQLite WAL**.
-5. Update your ESP32 sketch (`databaseURL` / `serverURL` and `fetchNumbersURL`) to use your live Render HTTPS URL:
-   - `https://<your-render-service>.onrender.com/api/upload`
-   - `https://<your-render-service>.onrender.com/api/get_numbers`
+3. **Environment Variables**:
+   - `ADMIN_USERNAME` (default: `admin`)
+   - `ADMIN_EMAIL` (default: `admin@riverguard.com`)
+   - `ADMIN_PASSWORD` (default: `riverguard2026` — change in Render Environment Variables for production)
+   - `DATABASE_URL` *(Optional)*: Connect a TiDB Cloud Serverless or MySQL database (`mysql://...`) for persistent storage across container restarts; otherwise runs automatically on high-concurrency SQLite WAL.
