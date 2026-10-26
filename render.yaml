@@ -11,3 +11,4 @@ services:
         value: "+639123456789"
       - key: DATABASE_URL
         sync: false
+
