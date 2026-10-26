@@ -1,6 +1,7 @@
 import os
 import re
 import ssl
+import hmac
 import time
 import sqlite3
 import threading
@@ -27,6 +28,10 @@ CORS(app)
 
 db_path = os.path.join(app.root_path, 'river.db')
 
+# Shared API key between ESP32 Main Gateway and Flask Server
+# Override GATEWAY_API_KEY in Render Environment Variables for production!
+DEFAULT_GATEWAY_KEY = 'rg-gateway-2026-key'
+
 # =========================================================
 # THREAD-SAFE IN-MEMORY CACHE FOR MULTI-USER SCALABILITY
 # =========================================================
@@ -36,6 +41,40 @@ _telemetry_cache = {
     "updated_at": 0.0
 }
 CACHE_TTL_SECONDS = 2.0
+
+
+def get_gateway_api_key():
+    return os.getenv('GATEWAY_API_KEY', DEFAULT_GATEWAY_KEY).strip()
+
+
+def gateway_key_required(f):
+    """
+    Protects hardware endpoints (/api/upload and /api/get_numbers) using X-API-Key
+    so registered mobile numbers and sensor logs are secure from unauthorized access.
+    """
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        expected_key = get_gateway_api_key()
+
+        # Check X-API-Key header first (recommended), then Authorization: Bearer, then form/JSON/query fallback
+        provided_key = request.headers.get('X-API-Key', '').strip()
+        if not provided_key:
+            auth_header = request.headers.get('Authorization', '').strip()
+            if auth_header.lower().startswith('bearer '):
+                provided_key = auth_header[7:].strip()
+        if not provided_key:
+            provided_key = (
+                request.args.get('api_key')
+                or request.form.get('api_key')
+                or ((request.get_json(silent=True) or {}).get('api_key') if request.is_json else None)
+                or ''
+            ).strip()
+
+        if not provided_key or not hmac.compare_digest(provided_key, expected_key):
+            return jsonify({"error": "Unauthorized: Invalid or missing X-API-Key"}), 401
+
+        return f(*args, **kwargs)
+    return decorated
 
 
 def is_mysql_configured():
@@ -113,7 +152,8 @@ def init_db():
                         timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
                         global_mode INT NOT NULL DEFAULT 1,
                         node1_distance INT NOT NULL DEFAULT 999,
-                        node2_distance INT DEFAULT 999
+                        node2_distance INT DEFAULT 999,
+                        node3_distance INT DEFAULT 999
                     )
                 ''')
                 cursor.execute('''
@@ -155,7 +195,8 @@ def init_db():
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             global_mode INTEGER,
             node1_distance INTEGER,
-            node2_distance INTEGER DEFAULT 999
+            node2_distance INTEGER DEFAULT 999,
+            node3_distance INTEGER DEFAULT 999
         )
     ''')
 
@@ -164,6 +205,8 @@ def init_db():
     }
     if 'node2_distance' not in existing_cols:
         cursor.execute("ALTER TABLE sensor_logs ADD COLUMN node2_distance INTEGER DEFAULT 999")
+    if 'node3_distance' not in existing_cols:
+        cursor.execute("ALTER TABLE sensor_logs ADD COLUMN node3_distance INTEGER DEFAULT 999")
 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS registered_numbers (
@@ -209,6 +252,19 @@ def admin_required(f):
     return decorated
 
 
+def compute_threat_mode(distances):
+    """Auto-computes threat level if ESP32 omits explicit mode/threat field."""
+    highest = 1
+    for d in distances:
+        if d is None:
+            continue
+        if 0 < d < 180:
+            return 3
+        elif 180 <= d < 300 and highest < 3:
+            highest = 2
+    return highest
+
+
 def validate_and_normalize_phone(raw_number):
     """
     Validates mobile number according to Table 3 Use Case Narrative:
@@ -218,7 +274,6 @@ def validate_and_normalize_phone(raw_number):
     """
     if raw_number is None or not isinstance(raw_number, str) or raw_number == '':
         return None
-    # Reject any whitespace (leading, trailing, or internal spaces)
     if any(ch.isspace() for ch in raw_number):
         return None
 
@@ -230,13 +285,16 @@ def validate_and_normalize_phone(raw_number):
 
 
 # =========================================================
-# 2. ESP32 MAIN GATEWAY UPLOAD ROUTE (/api/upload)
+# 2. ESP32 MAIN GATEWAY UPLOAD ROUTE (/api/upload) — API KEY PROTECTED
 # =========================================================
 @app.route('/api/upload', methods=['POST'])
+@gateway_key_required
 def receive_hardware_data():
     """
-    Receives real sensor telemetry from the ESP32 Main Gateway.
-    Supports both form-urlencoded (Pre-Oral) and JSON (Final Defense) payloads.
+    Receives real sensor telemetry from the ESP32 Main Gateway (protected by X-API-Key).
+    Compatible with both JSON and form-urlencoded payloads and 1-3 soldier nodes:
+      - JSON: {"node_1": 250, "node_2": 310, "node_3": 999, "threat": 2}
+      - Form: mode=2&node1=250&node2=310
     """
     try:
         payload = {}
@@ -247,16 +305,23 @@ def receive_hardware_data():
         else:
             payload = request.get_json(force=True, silent=True) or {}
 
-        raw_mode = payload.get('mode', payload.get('threat'))
-        raw_n1 = payload.get('node1', payload.get('node_1'))
+        raw_mode = payload.get('mode', payload.get('threat', payload.get('global_mode')))
+        raw_n1 = payload.get('node1', payload.get('node_1', payload.get('distance')))
         raw_n2 = payload.get('node2', payload.get('node_2', 999))
+        raw_n3 = payload.get('node3', payload.get('node_3', 999))
 
-        if raw_mode is None or raw_n1 is None:
-            return jsonify({"error": "Missing mode or node1 data"}), 400
+        if raw_n1 is None and raw_mode is None:
+            return jsonify({"error": "Missing sensor node or threat mode data"}), 400
 
-        system_mode = int(raw_mode)
-        node1_dist = int(float(raw_n1))
+        node1_dist = int(float(raw_n1)) if raw_n1 is not None else 999
         node2_dist = int(float(raw_n2)) if raw_n2 is not None else 999
+        node3_dist = int(float(raw_n3)) if raw_n3 is not None else 999
+
+        if raw_mode is not None:
+            system_mode = int(raw_mode)
+        else:
+            system_mode = compute_threat_mode([node1_dist, node2_dist, node3_dist])
+
         utc_now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
 
         if is_mysql_configured():
@@ -264,9 +329,10 @@ def receive_hardware_data():
             try:
                 with conn.cursor() as cursor:
                     cursor.execute('''
-                        INSERT INTO sensor_logs (timestamp, global_mode, node1_distance, node2_distance)
-                        VALUES (%s, %s, %s, %s)
-                    ''', (utc_now_str, system_mode, node1_dist, node2_dist))
+                        INSERT INTO sensor_logs
+                        (timestamp, global_mode, node1_distance, node2_distance, node3_distance)
+                        VALUES (%s, %s, %s, %s, %s)
+                    ''', (utc_now_str, system_mode, node1_dist, node2_dist, node3_dist))
                 conn.commit()
             finally:
                 conn.close()
@@ -274,9 +340,10 @@ def receive_hardware_data():
             conn = get_sqlite_connection()
             try:
                 conn.execute('''
-                    INSERT INTO sensor_logs (timestamp, global_mode, node1_distance, node2_distance)
-                    VALUES (?, ?, ?, ?)
-                ''', (utc_now_str, system_mode, node1_dist, node2_dist))
+                    INSERT INTO sensor_logs
+                    (timestamp, global_mode, node1_distance, node2_distance, node3_distance)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (utc_now_str, system_mode, node1_dist, node2_dist, node3_dist))
                 conn.commit()
             finally:
                 conn.close()
@@ -308,7 +375,7 @@ def get_latest_data():
             try:
                 with conn.cursor() as cursor:
                     cursor.execute('''
-                        SELECT timestamp, global_mode, node1_distance, node2_distance
+                        SELECT timestamp, global_mode, node1_distance, node2_distance, node3_distance
                         FROM sensor_logs
                         ORDER BY id DESC LIMIT 20
                     ''')
@@ -320,7 +387,7 @@ def get_latest_data():
             try:
                 cursor = conn.cursor()
                 cursor.execute('''
-                    SELECT timestamp, global_mode, node1_distance, node2_distance
+                    SELECT timestamp, global_mode, node1_distance, node2_distance, node3_distance
                     FROM sensor_logs
                     ORDER BY id DESC LIMIT 20
                 ''')
@@ -332,11 +399,16 @@ def get_latest_data():
         for r in rows:
             ts_val = r['timestamp']
             ts_str = ts_val.strftime('%Y-%m-%d %H:%M:%S') if isinstance(ts_val, datetime) else str(ts_val)
+            n1 = int(r['node1_distance']) if r['node1_distance'] is not None else 999
+            n2 = int(r['node2_distance']) if r.get('node2_distance') is not None else 999
+            n3 = int(r['node3_distance']) if r.get('node3_distance') is not None else 999
             data.append({
                 "time": ts_str,
                 "mode": int(r['global_mode']),
-                "distance": int(r['node1_distance']),
-                "node2": int(r['node2_distance']) if r.get('node2_distance') is not None else 999
+                "distance": n1,
+                "node1": n1,
+                "node2": n2,
+                "node3": n3
             })
 
         with _cache_lock:
@@ -350,12 +422,15 @@ def get_latest_data():
 
 
 # =========================================================
-# 4. SMS GATEWAY FETCH NUMBERS ROUTE (/api/get_numbers)
+# 4. SMS GATEWAY FETCH NUMBERS ROUTE (/api/get_numbers) — API KEY PROTECTED
 # =========================================================
 @app.route('/api/get_numbers', methods=['GET'])
+@gateway_key_required
 def get_numbers():
     """
-    Returns active registered mobile numbers in plain text for the ESP32 SIM800L module.
+    Returns active registered mobile numbers for the ESP32 SIM800L module (protected by X-API-Key).
+    - Default response: plain-text comma-separated (+639171111111,+639182222222)
+    - Optional ?format=json response: {"numbers": ["+639171111111", ...], "count": N}
     """
     try:
         if is_mysql_configured():
@@ -374,8 +449,13 @@ def get_numbers():
             finally:
                 conn.close()
 
+        if request.args.get('format', '').lower() == 'json':
+            return jsonify({"numbers": nums, "count": len(nums)}), 200
+
         return Response(",".join(nums), mimetype='text/plain', status=200)
-    except Exception:
+    except Exception as e:
+        if request.args.get('format', '').lower() == 'json':
+            return jsonify({"error": str(e), "numbers": []}), 500
         return Response("", mimetype='text/plain', status=200)
 
 
@@ -417,7 +497,6 @@ def register_mobile_number():
 
         normalized_phone = validate_and_normalize_phone(raw_phone)
         if not normalized_phone:
-            # Exact exception message from Table 3
             return jsonify({"error": "Invalid Phone Number Format"}), 400
 
         utc_now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
@@ -449,7 +528,6 @@ def register_mobile_number():
                     (normalized_phone,)
                 ).fetchone()
                 if existing:
-                    # Exact exception message from Table 3
                     return jsonify({"error": "Number Already Registered"}), 409
 
                 conn.execute('''
@@ -461,7 +539,6 @@ def register_mobile_number():
             finally:
                 conn.close()
 
-        # Exact success message from Table 3
         return jsonify({
             "message": "Registration Successful",
             "mobile_number": normalized_phone
@@ -513,7 +590,6 @@ def admin_login():
             session['admin_username'] = admin_row['username']
             return redirect(url_for('index'))
         else:
-            # Exact exception message from Table 1
             error_msg = "Incorrect Username or password"
 
     return render_template('login.html', error=error_msg)
@@ -521,7 +597,6 @@ def admin_login():
 
 @app.route('/logout', methods=['GET', 'POST'])
 def admin_logout():
-    # Table 6: Instantly destroys active session token and redirects to home page
     session.clear()
     return redirect(url_for('index'))
 
@@ -608,7 +683,6 @@ def delete_registered_number(record_id):
 
         return jsonify({"message": "Number deleted successfully"}), 200
     except Exception:
-        # Exact exception message from Table 4
         return jsonify({"error": "Delete Operation Failed. Please Try Again"}), 500
 
 

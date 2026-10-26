@@ -438,9 +438,16 @@
                         (latestReading.distance < 999 ? latestReading.distance : '--') + ' cm';
 
                     const node2El = document.getElementById('node2-distance');
+                    const extraNodes = [];
                     if (latestReading.node2 && latestReading.node2 < 999) {
+                        extraNodes.push('Node 2: ' + latestReading.node2 + ' cm');
+                    }
+                    if (latestReading.node3 && latestReading.node3 < 999) {
+                        extraNodes.push('Node 3: ' + latestReading.node3 + ' cm');
+                    }
+                    if (extraNodes.length > 0) {
                         node2El.style.display = 'block';
-                        node2El.innerText = 'Node 2 Distance: ' + latestReading.node2 + ' cm';
+                        node2El.innerText = extraNodes.join('  |  ');
                     } else {
                         node2El.style.display = 'none';
                     }

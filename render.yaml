@@ -2,6 +2,7 @@ services:
   - type: web
     name: riverguard-sentry
     runtime: python
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 60
     envVars:
@@ -9,6 +10,8 @@ services:
         value: 3.12.0
       - key: SECRET_KEY
         generateValue: true
+      - key: GATEWAY_API_KEY
+        value: rg-gateway-2026-key
       - key: ADMIN_USERNAME
         value: admin
       - key: ADMIN_EMAIL
