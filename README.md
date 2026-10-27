@@ -71,7 +71,8 @@ Open `https://riverguard-sentrymain.onrender.com/api/health` in your browser. Wh
 - **Main Gateway (`ESP32 + SX1262 + SIM800L + SSD1306`)**:
   - `Main_Node_Fin03/Main_Node_Fin03.ino` — Preserved baseline with SIM800L SMS fix and Render cloud sync.
   - `Main_Node_Fin04/Main_Node_Fin04.ino` — Preserved version: adds visible non-blocking **3× Blue LED blink (`Pin D2`)** whenever LoRa telemetry is received from any Soldier/Sensor Node.
-  - `Main_Node_Fin05/Main_Node_Fin05.ino` — Latest version: adds automatic **Registration Confirmation SMS** via SIM800L using the cloud database ID watermark (`/api/get_numbers?with_ids=1`), silently baselining pre-existing registrations on first sync so only newly registered numbers receive the confirmation text.
+  - `Main_Node_Fin05/Main_Node_Fin05.ino` — Preserved version: initial Registration Confirmation SMS implementation.
+  - `Main_Node_Fin06/Main_Node_Fin06.ino` — Latest version: fixes ESP32 Wi-Fi connection conflict (`wifi:sta is connecting, cannot set config`), adds 2.4GHz SSID & SIM800L signal diagnostics, and tracks welcomed phone numbers directly in NVS Flash (immune to TiDB Serverless ID jumps and supports Admin delete + re-register).
 - **Soldier / Sensor Node (`ESP32 + SX1262 + JSN-SR04T + MOSFET`)**:
   - `Soldier_Node_Fin02/Soldier_Node_Fin02.ino` — Preserved baseline.
   - `Soldier_Node_Fin03/Soldier_Node_Fin03.ino` — Latest version: fixes JSN-SR04T reading fluctuations by filtering valid ultrasonic echoes (`20–450 cm`) before median sorting and preventing `999` out-of-range timeouts from poisoning the Exponential Moving Average (`emaDistance`), restoring smooth incremental readings.
