@@ -6,19 +6,24 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <Preferences.h>
 
 // ============================================================================
-// >>> WI-FI & RENDER CLOUD ENDPOINTS (WITH X-API-KEY SECURITY) <<<
+// >>> WI-FI, OFFLINE FALLBACK SIM & RENDER CLOUD ENDPOINTS <<<
 // ============================================================================
-const char* ssid          = "realme 9 Pro 5G";
-const char* password      = "12345678";
+const char* ssid                = "realme 9 Pro 5G";
+const char* password            = "12345678";
+
+// Built-in Offline Fallback Emergency Number (works even with ZERO internet/Wi-Fi).
+// Replace "+639123456789" with your real responder SIM number (placeholder is skipped until changed):
+const char* fallbackPhoneNumber = "+639123456789";
 
 // Update the domain below if Render assigns a different subdomain on deployment:
-const char* uploadURL     = "https://riverguard-sentrymain.onrender.com/api/upload";
-const char* numbersURL    = "https://riverguard-sentrymain.onrender.com/api/get_numbers";
+const char* uploadURL           = "https://riverguard-sentrymain.onrender.com/api/upload";
+const char* numbersURL          = "https://riverguard-sentrymain.onrender.com/api/get_numbers";
 
 // Must match GATEWAY_API_KEY in Render Environment Variables (app.py default: rg-gateway-2026-key)
-const char* gatewayApiKey = "rg-gateway-2026-key";
+const char* gatewayApiKey       = "rg-gateway-2026-key";
 
 // --- HARDWARE PIN ASSIGNMENTS (MAIN GATEWAY NODE) ---
 const int blueLED         = 2;  // Onboard Blue LED (Rx/Tx indicator & SOS)
@@ -77,14 +82,20 @@ NodeState nodes[MAX_NODES];
 portMUX_TYPE nodeMux = portMUX_INITIALIZER_UNLOCKED;
 
 // --- GLOBAL THREAT, RELAY & SMS TIMERS ---
-volatile int globalMode          = 1; // 1 = SAFE, 2 = WARNING, 3 = CRITICAL
-String dynamicPhoneNumbers       = "";
-unsigned long lastWarnSmsTime    = 0;
-unsigned long lastCritSmsTime    = 0;
-bool firstWarnSmsSent            = false;
-bool firstCritSmsSent            = false;
-unsigned long lastStrobeToggle   = 0;
-bool strobeActiveState           = false;
+Preferences prefs;
+volatile int globalMode              = 1; // 1 = SAFE, 2 = WARNING, 3 = CRITICAL
+String dynamicPhoneNumbers           = ""; // Website-registered numbers (cached in RAM + NVS Flash)
+volatile bool newNumberRegistered    = false;
+unsigned long lastWarnSmsTime        = 0;
+unsigned long lastCritSmsTime        = 0;
+unsigned long lastEmptySmsCheck      = 0;
+int smsRetryCount                    = 0;
+bool firstWarnSmsSent                = false;
+bool firstCritSmsSent                = false;
+bool inSafeState                     = true;
+unsigned long safeSinceMillis        = 0;
+unsigned long lastStrobeToggle       = 0;
+bool strobeActiveState               = false;
 
 // --- UI & MOMENTARY BUTTON STATE MACHINE ---
 enum UiDisplayMode {
@@ -184,54 +195,169 @@ void updateGlobalThreatLevel(unsigned long now) {
   globalMode = highestThreat;
 }
 
-// --- HELPER: WAIT FOR SIM800L RESPONSE BETWEEN MULTI-RECIPIENT SMS ---
-void waitSim800Ready(unsigned long timeoutMs) {
+// --- HELPER: NORMALIZE PHILIPPINE SIM NUMBER & SKIP DUMMY PLACEHOLDER ---
+String normalizePhoneNumber(String raw) {
+  raw.trim();
+  if (raw == "+639123456789" || raw == "09123456789" || raw.length() < 11) {
+    return "";
+  }
+  if (raw.startsWith("09") && raw.length() == 11) {
+    return "+63" + raw.substring(1);
+  }
+  return raw;
+}
+
+// --- HELPER: DETECT IF A NEW MOBILE NUMBER WAS ADDED ON THE WEBSITE ---
+bool hasNewlyAddedNumber(const String &oldList, const String &newList) {
+  if (newList.length() < 11) return false;
+  int startIdx = 0;
+  while (startIdx < (int)newList.length()) {
+    int commaIdx = newList.indexOf(',', startIdx);
+    if (commaIdx == -1) commaIdx = newList.length();
+
+    String p = normalizePhoneNumber(newList.substring(startIdx, commaIdx));
+    if (p.length() >= 11 && oldList.indexOf(p) == -1) {
+      return true;
+    }
+    startIdx = commaIdx + 1;
+  }
+  return false;
+}
+
+// --- HELPER: WAIT FOR SPECIFIC SUBSTRING FROM SIM800L UART ---
+bool waitSim800Response(const char* expected, unsigned long timeoutMs) {
   unsigned long start = millis();
   String resp = "";
   while (millis() - start < timeoutMs) {
     while (sim800.available()) {
       char c = (char)sim800.read();
       resp += c;
-      if (resp.indexOf("OK") != -1 || resp.indexOf("ERROR") != -1) {
-        delay(200);
-        return;
+      if (resp.indexOf(expected) != -1) {
+        return true;
+      }
+      if (resp.indexOf("ERROR") != -1) {
+        return false;
       }
     }
-    delay(20);
+    delay(10);
   }
+  return false;
 }
 
-// --- DISPATCH SMS ALERTS TO REGISTERED DATABASE NUMBERS ---
-void broadcastSMS(const String &messageText) {
+// --- HELPER: SEND SINGLE SMS VIA SIM800L WITH FULL HANDSHAKE ---
+bool sendSingleSMS(const String &rawPhone, const String &messageText) {
+  String phone = normalizePhoneNumber(rawPhone);
+  if (phone.length() < 11) return false;
+
+  Serial.print("[SMS] Sending alert to: ");
+  Serial.println(phone);
+
+  // 1. Verify AT command mode (recover with ESC if stuck in an unfinished prompt)
+  while (sim800.available()) sim800.read();
+  sim800.println("AT");
+  if (!waitSim800Response("OK", 600)) {
+    sim800.write(27); // ESC cancels any stuck prompt
+    delay(200);
+    while (sim800.available()) sim800.read();
+    sim800.println("AT");
+    waitSim800Response("OK", 800);
+  }
+
+  // 2. Ensure SMS Text Mode and completely flush its "OK" before AT+CMGS
+  while (sim800.available()) sim800.read();
+  sim800.println("AT+CMGF=1");
+  waitSim800Response("OK", 1000);
+  delay(50);
+  while (sim800.available()) sim800.read();
+
+  // 3. Open SMS recipient prompt and wait for '>'
+  sim800.print("AT+CMGS=\"");
+  sim800.print(phone);
+  sim800.println("\"");
+  if (!waitSim800Response(">", 3000)) {
+    Serial.println("[SMS] '>' prompt timeout, attempting send...");
+  }
+  delay(50);
+  while (sim800.available()) sim800.read();
+
+  // 4. Write message body, flush UART echo, then send CTRL+Z (ASCII 26)
+  sim800.print(messageText);
+  delay(150);
+  while (sim800.available()) sim800.read();
+  sim800.write(26);
+
+  // 5. Wait up to 10 seconds for GSM cellular network confirmation (+CMGS: ... OK)
+  unsigned long start = millis();
+  String resp = "";
+  bool sentOk = false;
+  while (millis() - start < 10000UL) {
+    while (sim800.available()) {
+      char c = (char)sim800.read();
+      resp += c;
+      if ((resp.indexOf("+CMGS:") != -1 && resp.indexOf("OK") != -1) ||
+          resp.endsWith("OK\r\n")) {
+        sentOk = true;
+        break;
+      }
+      if (resp.indexOf("ERROR") != -1) {
+        break;
+      }
+    }
+    if (sentOk || resp.indexOf("ERROR") != -1) break;
+    delay(20);
+  }
+
+  Serial.print("[SMS] Result for ");
+  Serial.print(phone);
+  Serial.print(": ");
+  Serial.println(sentOk ? "DELIVERED TO GSM NETWORK" : resp);
+
+  delay(1000); // Allow SIM800L baseband to settle before next recipient
+  return sentOk;
+}
+
+// --- DISPATCH SMS ALERTS (REGISTERED DATABASE NUMBERS + OFFLINE FALLBACK) ---
+bool broadcastSMS(const String &messageText) {
   String numbersCopy;
   portENTER_CRITICAL(&nodeMux);
   numbersCopy = dynamicPhoneNumbers;
   portEXIT_CRITICAL(&nodeMux);
 
-  if (numbersCopy.length() < 7) return;
+  int recipientCount = 0;
+  int deliveredCount = 0;
 
-  int startIdx = 0;
-  while (startIdx < (int)numbersCopy.length()) {
-    int commaIdx = numbersCopy.indexOf(',', startIdx);
-    if (commaIdx == -1) commaIdx = numbersCopy.length();
+  // 1. Text all numbers synced from the website database
+  if (numbersCopy.length() >= 11) {
+    int startIdx = 0;
+    while (startIdx < (int)numbersCopy.length()) {
+      int commaIdx = numbersCopy.indexOf(',', startIdx);
+      if (commaIdx == -1) commaIdx = numbersCopy.length();
 
-    String phone = numbersCopy.substring(startIdx, commaIdx);
-    phone.trim();
-
-    if (phone.length() >= 10) {
-      while (sim800.available()) sim800.read(); // Flush stale UART bytes
-      sim800.println("AT+CMGF=1");
-      delay(150);
-      sim800.print("AT+CMGS=\"");
-      sim800.print(phone);
-      sim800.println("\"");
-      delay(250);
-      sim800.print(messageText);
-      sim800.write(26); // CTRL+Z
-      waitSim800Ready(4500); // Wait for GSM network confirmation before next recipient
+      String phone = normalizePhoneNumber(numbersCopy.substring(startIdx, commaIdx));
+      if (phone.length() >= 11) {
+        recipientCount++;
+        if (sendSingleSMS(phone, messageText)) {
+          deliveredCount++;
+        }
+      }
+      startIdx = commaIdx + 1;
     }
-    startIdx = commaIdx + 1;
   }
+
+  // 2. Also text the built-in offline fallback number (if set to a real SIM & not duplicate)
+  String fallbackNorm = normalizePhoneNumber(String(fallbackPhoneNumber));
+  if (fallbackNorm.length() >= 11 && numbersCopy.indexOf(fallbackNorm) == -1) {
+    recipientCount++;
+    if (sendSingleSMS(fallbackNorm, messageText)) {
+      deliveredCount++;
+    }
+  }
+
+  if (recipientCount == 0) {
+    Serial.println("[SMS] No registered or real fallback SIM numbers available yet.");
+    return false;
+  }
+  return (deliveredCount > 0);
 }
 
 // ============================================================================
@@ -251,23 +377,39 @@ void TaskWiFiCloud(void *pvParameters) {
     }
 
     if (WiFi.status() == WL_CONNECTED) {
-      WiFiClientSecure client;
-      client.setInsecure();
-
       // 1. SECURELY RETRIEVE REGISTERED PHONE NUMBERS FROM WEBSITE DATABASE
       {
+        WiFiClientSecure clientGet;
+        clientGet.setInsecure();
         HTTPClient httpGet;
         httpGet.setTimeout(10000);
-        if (httpGet.begin(client, numbersURL)) {
+        httpGet.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+        if (httpGet.begin(clientGet, numbersURL)) {
           httpGet.addHeader("X-API-Key", gatewayApiKey);
           int httpCode = httpGet.GET();
           if (httpCode == HTTP_CODE_OK) {
             String payload = httpGet.getString();
             payload.trim();
-            // Always sync on HTTP 200 (including empty "" when Admin deletes all numbers)
+
+            String oldNumbers;
             portENTER_CRITICAL(&nodeMux);
+            oldNumbers = dynamicPhoneNumbers;
+            bool changed = (dynamicPhoneNumbers != payload);
             dynamicPhoneNumbers = payload;
             portEXIT_CRITICAL(&nodeMux);
+
+            if (changed) {
+              if (hasNewlyAddedNumber(oldNumbers, payload)) {
+                newNumberRegistered = true;
+              }
+              prefs.begin("riverguard", false);
+              prefs.putString("sms_list", payload);
+              prefs.end();
+
+              Serial.print("[Cloud] Synced registered SMS numbers: ");
+              Serial.println(payload.length() > 0 ? payload : "(none)");
+            }
           } else {
             Serial.print("[Cloud] GET numbers HTTP code: ");
             Serial.println(httpCode);
@@ -278,9 +420,11 @@ void TaskWiFiCloud(void *pvParameters) {
 
       vTaskDelay(pdMS_TO_TICKS(200));
 
-      // 2. SECURELY UPLOAD ALL DISCOVERED NODES IN ONE COMBINED HTTPS REQUEST
-      String jsonPayload = "{\"mode\":" + String(globalMode) + ",\"nodes\":[";
+      // 2. SECURELY UPLOAD ALL DISCOVERED SOLDIER NODES IN ONE COMBINED HTTPS REQUEST
+      String nodesJsonArray = "[";
       bool hasDiscoveredNodes = false;
+      long primaryActiveDist  = 999;
+      long legacyNodeDist[4]  = { 999, 999, 999, 999 };
 
       for (int i = 1; i < MAX_NODES; i++) {
         bool heardSnap;
@@ -298,26 +442,44 @@ void TaskWiFiCloud(void *pvParameters) {
         portEXIT_CRITICAL(&nodeMux);
 
         if (heardSnap) {
-          if (hasDiscoveredNodes) jsonPayload += ",";
+          if (hasDiscoveredNodes) nodesJsonArray += ",";
           hasDiscoveredNodes = true;
 
           unsigned long now = millis();
           bool offline      = (now - seenSnap >= OFFLINE_TIMEOUT_MS);
           String statusStr  = offline ? "OFFLINE" : "ONLINE";
 
-          jsonPayload += "{\"id\":" + String(i) +
-                         ",\"distance\":" + String(distSnap) +
-                         ",\"battery\":" + String(batSnap) +
-                         ",\"rssi\":" + String((int)rssiSnap) +
-                         ",\"status\":\"" + statusStr + "\"}";
+          if (!offline && distSnap > 0 && distSnap < primaryActiveDist) {
+            primaryActiveDist = distSnap;
+          }
+          if (i >= 1 && i <= 3) {
+            legacyNodeDist[i] = distSnap;
+          }
+
+          nodesJsonArray += "{\"id\":" + String(i) +
+                            ",\"distance\":" + String(distSnap) +
+                            ",\"battery\":" + String(batSnap) +
+                            ",\"rssi\":" + String((int)rssiSnap) +
+                            ",\"status\":\"" + statusStr + "\"}";
         }
       }
-      jsonPayload += "]}";
+      nodesJsonArray += "]";
 
       if (hasDiscoveredNodes) {
+        String jsonPayload = "{\"mode\":" + String(globalMode) +
+                             ",\"distance\":" + String(primaryActiveDist) +
+                             ",\"node1\":" + String(legacyNodeDist[1] < 999 ? legacyNodeDist[1] : primaryActiveDist) +
+                             ",\"node2\":" + String(legacyNodeDist[2]) +
+                             ",\"node3\":" + String(legacyNodeDist[3]) +
+                             ",\"nodes\":" + nodesJsonArray + "}";
+
+        WiFiClientSecure clientPost;
+        clientPost.setInsecure();
         HTTPClient httpPost;
         httpPost.setTimeout(10000);
-        if (httpPost.begin(client, uploadURL)) {
+        httpPost.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+        if (httpPost.begin(clientPost, uploadURL)) {
           httpPost.addHeader("Content-Type", "application/json");
           httpPost.addHeader("X-API-Key", gatewayApiKey);
           int postCode = httpPost.POST(jsonPayload);
@@ -511,6 +673,11 @@ void setup() {
 
   sim800.begin(9600, SERIAL_8N1, simRxPin, simTxPin);
 
+  // Load last synced website numbers from ESP32 Flash in case we boot without internet
+  prefs.begin("riverguard", true);
+  dynamicPhoneNumbers = prefs.getString("sms_list", "");
+  prefs.end();
+
   pinMode(blueLED, OUTPUT);
   pinMode(loraDio1Pin, INPUT);
   pinMode(strobeRelay, OUTPUT);
@@ -543,9 +710,33 @@ void setup() {
   display.println("POST: MAIN GATEWAY");
   display.println("OLED... OK");
   display.display();
-  delay(500);
+  delay(400);
 
-  // 2. POST: SX1262 915MHz RADIO (LOCKED TO PROVEN 2KM SETTINGS: 915.0, 125.0, 9, 7, 0x12, 20)
+  // 2. POST: SIM800L GSM MODULE (Auto-baud calibration + SMS Text Mode)
+  display.println("SIM800L Init...");
+  display.display();
+  bool simReady = false;
+  for (int attempt = 0; attempt < 4; attempt++) {
+    while (sim800.available()) sim800.read();
+    sim800.println("AT");
+    if (waitSim800Response("OK", 500)) {
+      simReady = true;
+      break;
+    }
+    delay(250);
+  }
+  sim800.println("AT+CMGF=1");
+  waitSim800Response("OK", 500);
+  sim800.println("AT+CSCS=\"GSM\"");
+  waitSim800Response("OK", 500);
+  while (sim800.available()) sim800.read();
+  Serial.println(simReady ? "[GSM] SIM800L Ready (Text Mode)" : "[GSM] SIM800L warming up (will retry on SMS)");
+
+  // 3. POST: SX1262 915MHz RADIO (LOCKED TO PROVEN 2KM SETTINGS: 915.0, 125.0, 9, 7, 0x12, 20)
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println("POST: MAIN GATEWAY");
+  display.println(simReady ? "SIM800L... OK" : "SIM800L... WAIT");
   display.println("Radio Init...");
   display.display();
   int state = radio.begin(915.0, 125.0, 9, 7, 0x12, 20);
@@ -687,15 +878,33 @@ void loop() {
 
   // --- 4. PHYSICAL 12V ALARMS & RATE-LIMITED SMS DISPATCH ---
   if (globalMode == 3) {
+    inSafeState = false;
     digitalWrite(strobeRelay, LOW);
     digitalWrite(sirenRelay, LOW);
 
-    if (!firstCritSmsSent || (now - lastCritSmsTime >= 300000UL)) {
-      firstCritSmsSent = true;
-      lastCritSmsTime  = now;
-      broadcastSMS("RIVERGUARD CRITICAL ALERT: Water level has breached critical threshold (<180cm). Evacuate immediately!");
+    bool critDue = (!firstCritSmsSent || newNumberRegistered || (now - lastCritSmsTime >= 300000UL));
+    if (critDue && (lastEmptySmsCheck == 0 || (now - lastEmptySmsCheck >= 10000UL) || newNumberRegistered)) {
+      if (newNumberRegistered) smsRetryCount = 0;
+      newNumberRegistered = false;
+      if (broadcastSMS("RIVERGUARD CRITICAL ALERT: Water level has breached critical threshold (<180cm). Evacuate immediately!")) {
+        firstCritSmsSent  = true;
+        lastCritSmsTime   = millis();
+        lastEmptySmsCheck = 0;
+        smsRetryCount     = 0;
+      } else {
+        smsRetryCount++;
+        if (smsRetryCount >= 6) {
+          firstCritSmsSent  = true;
+          lastCritSmsTime   = millis();
+          lastEmptySmsCheck = 0;
+          smsRetryCount     = 0;
+        } else {
+          lastEmptySmsCheck = millis(); // Retry in 10s once numbers sync or GSM registers
+        }
+      }
     }
   } else if (globalMode == 2) {
+    inSafeState = false;
     digitalWrite(sirenRelay, HIGH);
 
     if (now - lastStrobeToggle >= 1000UL) {
@@ -704,13 +913,42 @@ void loop() {
       digitalWrite(strobeRelay, strobeActiveState ? LOW : HIGH);
     }
 
-    if (!firstWarnSmsSent || (now - lastWarnSmsTime >= 1200000UL)) {
-      firstWarnSmsSent = true;
-      lastWarnSmsTime  = now;
-      broadcastSMS("RIVERGUARD WARNING: River water level is rising (180cm-300cm). Please stay alert.");
+    bool warnDue = (!firstWarnSmsSent || newNumberRegistered || (now - lastWarnSmsTime >= 1200000UL));
+    if (warnDue && (lastEmptySmsCheck == 0 || (now - lastEmptySmsCheck >= 10000UL) || newNumberRegistered)) {
+      if (newNumberRegistered) smsRetryCount = 0;
+      newNumberRegistered = false;
+      if (broadcastSMS("RIVERGUARD WARNING: River water level is rising (180cm-300cm). Please stay alert.")) {
+        firstWarnSmsSent  = true;
+        lastWarnSmsTime   = millis();
+        lastEmptySmsCheck = 0;
+        smsRetryCount     = 0;
+      } else {
+        smsRetryCount++;
+        if (smsRetryCount >= 6) {
+          firstWarnSmsSent  = true;
+          lastWarnSmsTime   = millis();
+          lastEmptySmsCheck = 0;
+          smsRetryCount     = 0;
+        } else {
+          lastEmptySmsCheck = millis(); // Retry in 10s once numbers sync or GSM registers
+        }
+      }
     }
   } else {
     digitalWrite(strobeRelay, HIGH);
     digitalWrite(sirenRelay, HIGH);
+    newNumberRegistered = false;
+    lastEmptySmsCheck   = 0;
+    smsRetryCount       = 0;
+
+    // Reset SMS alert latches after 10 seconds in SAFE so subsequent flood rises trigger immediately
+    if (!inSafeState) {
+      inSafeState     = true;
+      safeSinceMillis = now;
+    } else if (now - safeSinceMillis >= 10000UL) {
+      firstWarnSmsSent = false;
+      firstCritSmsSent = false;
+    }
   }
 }
+

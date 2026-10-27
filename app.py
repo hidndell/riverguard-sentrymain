@@ -317,6 +317,24 @@ def compute_threat_mode(nodes_list):
     return highest
 
 
+def select_primary_node(all_nodes):
+    """
+    Selects the active online Soldier Node with the closest water reading (< 999 cm)
+    so historical distance logs always reflect real Soldier Node water levels.
+    """
+    online_valid = [
+        x for x in all_nodes
+        if str(x.get('status', 'ONLINE')).upper() != 'OFFLINE' and 0 < int(x.get('distance', 999)) < 999
+    ]
+    if online_valid:
+        return min(online_valid, key=lambda x: int(x['distance']))
+    online_any = [
+        x for x in all_nodes
+        if str(x.get('status', 'ONLINE')).upper() != 'OFFLINE'
+    ]
+    return online_any[0] if online_any else all_nodes[0]
+
+
 def validate_and_normalize_phone(raw_number):
     """
     Validates mobile number according to Table 3 Use Case Narrative:
@@ -384,8 +402,8 @@ def receive_hardware_data():
                 "rssi": int(float(payload['rssi'])) if payload.get('rssi') is not None else None,
                 "status": str(payload.get('status', 'ONLINE')).upper()
             })
-        elif 'node1' in payload or 'node_1' in payload:
-            d1 = int(float(payload.get('node1', payload.get('node_1', 999))))
+        elif 'node1' in payload or 'node_1' in payload or 'distance' in payload:
+            d1 = int(float(payload.get('node1', payload.get('node_1', payload.get('distance', 999)))))
             incoming_nodes.append({
                 "id": 1,
                 "distance": d1,
@@ -399,6 +417,16 @@ def receive_hardware_data():
                     incoming_nodes.append({
                         "id": 2,
                         "distance": d2,
+                        "battery": 100,
+                        "rssi": None,
+                        "status": "ONLINE"
+                    })
+            if payload.get('node3') or payload.get('node_3'):
+                d3 = int(float(payload.get('node3', payload.get('node_3', 999))))
+                if d3 < 999:
+                    incoming_nodes.append({
+                        "id": 3,
+                        "distance": d3,
                         "battery": 100,
                         "rssi": None,
                         "status": "ONLINE"
@@ -432,9 +460,9 @@ def receive_hardware_data():
                     all_nodes = cursor.fetchall()
 
                     system_mode = int(raw_mode) if raw_mode is not None else compute_threat_mode(all_nodes)
-                    primary_node_obj = next((x for x in all_nodes if x['id'] == 1), all_nodes[0])
-                    primary_dist = primary_node_obj['distance']
-                    primary_nid = primary_node_obj['id']
+                    primary_node_obj = select_primary_node(all_nodes)
+                    primary_dist = int(primary_node_obj['distance'])
+                    primary_nid = int(primary_node_obj['id'])
 
                     cursor.execute('''
                         INSERT INTO sensor_logs (node_id, timestamp, global_mode, node1_distance, nodes_json)
@@ -466,9 +494,9 @@ def receive_hardware_data():
                 all_nodes = [dict(r) for r in rows]
 
                 system_mode = int(raw_mode) if raw_mode is not None else compute_threat_mode(all_nodes)
-                primary_node_obj = next((x for x in all_nodes if x['id'] == 1), all_nodes[0])
-                primary_dist = primary_node_obj['distance']
-                primary_nid = primary_node_obj['id']
+                primary_node_obj = select_primary_node(all_nodes)
+                primary_dist = int(primary_node_obj['distance'])
+                primary_nid = int(primary_node_obj['id'])
 
                 cursor.execute('''
                     INSERT INTO sensor_logs (node_id, timestamp, global_mode, node1_distance, nodes_json)
@@ -498,7 +526,9 @@ def get_latest_data():
         now = time.time()
         with _cache_lock:
             if _telemetry_cache["rows"] is not None and (now - _telemetry_cache["updated_at"]) < CACHE_TTL_SECONDS:
-                return jsonify(_telemetry_cache["rows"]), 200
+                resp = jsonify(_telemetry_cache["rows"])
+                resp.headers['Cache-Control'] = 'no-store'
+                return resp, 200
 
         if is_mysql_configured():
             conn = get_mysql_connection()
@@ -552,7 +582,9 @@ def get_latest_data():
             _telemetry_cache["rows"] = data
             _telemetry_cache["updated_at"] = now
 
-        return jsonify(data), 200
+        resp = jsonify(data)
+        resp.headers['Cache-Control'] = 'no-store'
+        return resp, 200
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -586,13 +618,15 @@ def get_numbers():
                 conn.close()
 
         if request.args.get('format', '').lower() == 'json':
-            return jsonify({"numbers": nums, "count": len(nums)}), 200
+            resp = jsonify({"numbers": nums, "count": len(nums)})
+            resp.headers['Cache-Control'] = 'no-store'
+            return resp, 200
 
-        return Response(",".join(nums), mimetype='text/plain', status=200)
+        return Response(",".join(nums), mimetype='text/plain', status=200, headers={'Cache-Control': 'no-store'})
     except Exception as e:
         if request.args.get('format', '').lower() == 'json':
             return jsonify({"error": str(e), "numbers": []}), 500
-        return Response("", mimetype='text/plain', status=200)
+        return Response("", mimetype='text/plain', status=200, headers={'Cache-Control': 'no-store'})
 
 
 # =========================================================

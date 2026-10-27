@@ -46,3 +46,4 @@ CREATE TABLE IF NOT EXISTS sensor_logs (
         ON DELETE SET NULL
         ON UPDATE CASCADE
 );
+

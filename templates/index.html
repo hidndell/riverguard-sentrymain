@@ -172,19 +172,18 @@
             to { box-shadow: 0 0 30px var(--crit-color); }
         }
 
-        /* Distance Readout Styles */
-        .distance-readout {
-            font-size: 3.6em;
-            font-weight: bold;
-            color: var(--accent-cyan);
-            margin: 10px 0 6px 0;
+        /* Soldier Node Readings Styles */
+        .nodes-empty {
+            color: #888;
+            font-size: 1rem;
+            padding: 24px 0 14px 0;
         }
 
         .nodes-list {
             display: flex;
             flex-direction: column;
-            gap: 8px;
-            margin-top: 10px;
+            gap: 10px;
+            margin-top: 12px;
             text-align: left;
         }
 
@@ -195,8 +194,20 @@
             background: #161616;
             border: 1px solid #2b2b2b;
             border-radius: 8px;
-            padding: 8px 12px;
-            font-size: 0.9rem;
+            padding: 12px 14px;
+            font-size: 0.95rem;
+        }
+
+        .node-distance-val {
+            font-size: 1.45rem;
+            font-weight: 700;
+            color: var(--accent-cyan);
+        }
+
+        .node-meta {
+            color: #999;
+            font-size: 0.82rem;
+            margin-top: 3px;
         }
 
         .node-status-online {
@@ -342,8 +353,8 @@
         </div>
 
         <div class="card">
-            <h3>Sensor Readings (Main Gateway)</h3>
-            <div id="node-distance" class="distance-readout">-- cm</div>
+            <h3>Soldier Node Readings</h3>
+            <div id="nodes-empty" class="nodes-empty">Waiting for Soldier Node transmissions...</div>
             <div id="nodes-container" class="nodes-list" style="display: none;"></div>
             <p id="last-updated" style="color: #888; font-size: 0.88em; margin-top: 12px; margin-bottom: 0;">
                 Last updated: Waiting for data...
@@ -449,84 +460,84 @@
         // --- 2. FETCH REAL GATEWAY DATA ---
         async function fetchLatestData() {
             try {
-                const response = await fetch('/api/get_latest');
+                const response = await fetch('/api/get_latest', { cache: 'no-store' });
                 const data = await response.json();
 
                 if (Array.isArray(data) && data.length > 0) {
                     const reversedData = [...data].reverse();
                     const latestReading = reversedData[reversedData.length - 1];
-                    const activeNodes = Array.isArray(latestReading.nodes) ? latestReading.nodes : [];
+                    const activeNodes = Array.isArray(latestReading.nodes) && latestReading.nodes.length > 0
+                        ? latestReading.nodes
+                        : [{ id: 1, distance: Number(latestReading.distance ?? 999), battery: 100, status: 'ONLINE' }];
 
                     // Build chart labels
                     const newLabels = reversedData.map(row =>
                         parseUtcDate(row.time).toLocaleTimeString([], { hour12: false })
                     );
 
-                    // Collect all discovered node IDs across history
+                    // Collect all discovered Soldier Node IDs across history
                     const nodeIdSet = new Set();
                     reversedData.forEach(row => {
-                        if (Array.isArray(row.nodes)) {
-                            row.nodes.forEach(n => nodeIdSet.add(n.id));
+                        if (Array.isArray(row.nodes) && row.nodes.length > 0) {
+                            row.nodes.forEach(n => nodeIdSet.add(Number(n.id)));
+                        } else if (row.distance !== undefined) {
+                            nodeIdSet.add(1);
                         }
                     });
                     const nodeIds = Array.from(nodeIdSet).sort((a, b) => a - b);
 
-                    if (nodeIds.length > 0) {
-                        waterChart.data.datasets = nodeIds.map((nid, idx) => {
-                            const palette = NODE_COLORS[idx % NODE_COLORS.length];
-                            return {
-                                label: `Node ${nid} Distance (cm)`,
-                                data: reversedData.map(row => {
-                                    const match = (row.nodes || []).find(n => n.id === nid);
-                                    return (match && match.distance < 999) ? match.distance : null;
-                                }),
-                                borderColor: palette.border,
-                                backgroundColor: palette.bg,
-                                borderWidth: 3,
-                                pointRadius: 4,
-                                fill: idx === 0,
-                                spanGaps: true,
-                                tension: 0.4
-                            };
-                        });
-                    } else {
-                        waterChart.data.datasets[0].data = reversedData.map(r => r.distance < 999 ? r.distance : null);
-                    }
+                    waterChart.data.datasets = nodeIds.map((nid, idx) => {
+                        const palette = NODE_COLORS[idx % NODE_COLORS.length];
+                        return {
+                            label: `Soldier Node ${nid} (cm)`,
+                            data: reversedData.map(row => {
+                                if (Array.isArray(row.nodes) && row.nodes.length > 0) {
+                                    const match = row.nodes.find(n => Number(n.id) === nid);
+                                    if (!match) return null;
+                                    const d = Number(match.distance);
+                                    return (d > 0 && d < 999) ? d : null;
+                                }
+                                const fallbackDist = Number(row.distance);
+                                return (nid === 1 && fallbackDist > 0 && fallbackDist < 999) ? fallbackDist : null;
+                            }),
+                            borderColor: palette.border,
+                            backgroundColor: palette.bg,
+                            borderWidth: 3,
+                            pointRadius: 5,
+                            fill: idx === 0,
+                            spanGaps: true,
+                            tension: 0.35
+                        };
+                    });
 
                     waterChart.data.labels = newLabels;
                     waterChart.update();
 
-                    // Render Sensor Readings Card
-                    const mainReadout = document.getElementById('node-distance');
+                    // Render Soldier Node Readings Card (no Main Gateway sensor readout)
+                    const emptyEl = document.getElementById('nodes-empty');
                     const nodesContainer = document.getElementById('nodes-container');
+                    emptyEl.style.display = 'none';
+                    nodesContainer.style.display = 'flex';
 
-                    if (activeNodes.length <= 1) {
-                        const n = activeNodes[0] || { id: 1, distance: latestReading.distance, battery: 100, status: 'ONLINE' };
-                        mainReadout.style.display = 'block';
-                        mainReadout.innerText = (n.distance < 999 ? n.distance : '--') + ' cm';
-                        nodesContainer.style.display = 'flex';
-                        const isOff = String(n.status).toUpperCase() === 'OFFLINE';
-                        nodesContainer.innerHTML = `
+                    nodesContainer.innerHTML = activeNodes.map(n => {
+                        const nid = Number(n.id);
+                        const dist = Number(n.distance);
+                        const bat = n.battery ?? 100;
+                        const isOff = String(n.status || 'ONLINE').toUpperCase() === 'OFFLINE';
+                        const distTxt = (dist > 0 && dist < 999) ? `${dist} cm` : 'Out of Range';
+                        return `
                             <div class="node-row">
-                                <span><strong>Node ${n.id}</strong> &bull; Bat: ${n.battery ?? 100}%</span>
-                                <span class="${isOff ? 'node-status-offline' : 'node-status-online'}">${isOff ? 'OFFLINE' : 'ONLINE'}</span>
+                                <div>
+                                    <div><strong>Soldier Node ${nid}</strong></div>
+                                    <div class="node-meta">
+                                        Bat: ${bat}% &bull;
+                                        <span class="${isOff ? 'node-status-offline' : 'node-status-online'}">${isOff ? 'OFFLINE' : 'ONLINE'}</span>
+                                    </div>
+                                </div>
+                                <div class="node-distance-val">${distTxt}</div>
                             </div>
                         `;
-                    } else {
-                        // Multiple discovered Soldier Nodes: show clean per-node rows
-                        mainReadout.style.display = 'none';
-                        nodesContainer.style.display = 'flex';
-                        nodesContainer.innerHTML = activeNodes.map(n => {
-                            const isOff = String(n.status).toUpperCase() === 'OFFLINE';
-                            const distTxt = n.distance < 999 ? `${n.distance} cm` : 'Out of Range';
-                            return `
-                                <div class="node-row">
-                                    <span><strong>Node ${n.id}:</strong> <span style="color:#34dbcc; font-weight:700;">${distTxt}</span></span>
-                                    <span>Bat: ${n.battery ?? 100}% &bull; <span class="${isOff ? 'node-status-offline' : 'node-status-online'}">${isOff ? 'OFFLINE' : 'ONLINE'}</span></span>
-                                </div>
-                            `;
-                        }).join('');
-                    }
+                    }).join('');
 
                     const localTime = parseUtcDate(latestReading.time).toLocaleString();
                     document.getElementById('last-updated').innerText = 'Last updated: ' + localTime;
@@ -534,14 +545,15 @@
 
                     const threatBox = document.getElementById('threat-level');
                     threatBox.className = 'status-box';
+                    const modeNum = Number(latestReading.mode);
 
-                    if (latestReading.mode === 1) {
+                    if (modeNum === 1) {
                         threatBox.classList.add('status-safe');
                         threatBox.innerText = 'SAFE';
-                    } else if (latestReading.mode === 2) {
+                    } else if (modeNum === 2) {
                         threatBox.classList.add('status-warn');
                         threatBox.innerText = 'WARNING';
-                    } else if (latestReading.mode === 3) {
+                    } else if (modeNum === 3) {
                         threatBox.classList.add('status-crit');
                         threatBox.innerText = 'CRITICAL ALERT';
                     } else {
