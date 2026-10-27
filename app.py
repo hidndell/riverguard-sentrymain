@@ -833,8 +833,10 @@ def get_latest_data():
 @gateway_key_required
 def get_numbers():
     """
-    Returns active registered mobile numbers for Main_Node_Fin03 / Main_Node_Fin04 SIM800L (protected by X-API-Key).
-    Plain-text comma-separated: +639171111111,+639182222222 (or empty string if none).
+    Returns active registered mobile numbers for Main_Node SIM800L (protected by X-API-Key).
+    - Default plain-text: +639171111111,+639182222222 (backward-compatible with Fin03 / Fin04)
+    - ?with_ids=1 plain-text: 1:+639171111111,2:+639182222222 (used by Fin05 confirmation SMS watermark)
+    - ?format=json: {"numbers": [...], "records": [{"id": 1, "mobile_number": "..."}], "count": N}
     """
     try:
         backend = get_db_backend()
@@ -842,28 +844,40 @@ def get_numbers():
             conn = get_cloud_connection(backend)
             try:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT mobile_number FROM registered_numbers ORDER BY id ASC")
-                    nums = [row['mobile_number'] for row in cursor.fetchall()]
+                    cursor.execute("SELECT id, mobile_number FROM registered_numbers ORDER BY id ASC")
+                    records = [
+                        {"id": int(row['id']), "mobile_number": row['mobile_number']}
+                        for row in cursor.fetchall()
+                    ]
             finally:
                 conn.close()
         else:
             conn = get_sqlite_connection()
             try:
-                rows = conn.execute("SELECT mobile_number FROM registered_numbers ORDER BY id ASC").fetchall()
-                nums = [row['mobile_number'] for row in rows]
+                rows = conn.execute("SELECT id, mobile_number FROM registered_numbers ORDER BY id ASC").fetchall()
+                records = [
+                    {"id": int(row['id']), "mobile_number": row['mobile_number']}
+                    for row in rows
+                ]
             finally:
                 conn.close()
 
+        nums = [r['mobile_number'] for r in records]
+
         if request.args.get('format', '').lower() == 'json':
-            resp = jsonify({"numbers": nums, "count": len(nums)})
+            resp = jsonify({"numbers": nums, "records": records, "count": len(nums)})
             resp.headers['Cache-Control'] = 'no-store'
             return resp, 200
+
+        if request.args.get('with_ids', '').lower() in ('1', 'true', 'yes'):
+            with_ids_str = ",".join(f"{r['id']}:{r['mobile_number']}" for r in records)
+            return Response(with_ids_str, mimetype='text/plain', status=200, headers={'Cache-Control': 'no-store'})
 
         return Response(",".join(nums), mimetype='text/plain', status=200, headers={'Cache-Control': 'no-store'})
     except Exception as e:
         if request.args.get('format', '').lower() == 'json':
             return jsonify({"error": str(e), "numbers": []}), 500
-        return Response("", mimetype='text/plain', status=200, headers={'Cache-Control': 'no-store'})
+        return Response("ERROR", mimetype='text/plain', status=500, headers={'Cache-Control': 'no-store'})
 
 
 # =========================================================
