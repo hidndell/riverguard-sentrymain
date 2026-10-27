@@ -8,7 +8,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from functools import wraps
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from flask import (
     Flask, request, jsonify, render_template,
     redirect, url_for, session, Response
@@ -23,13 +23,20 @@ try:
 except ImportError:
     HAS_PYMYSQL = False
 
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PSYCOPG2 = True
+except ImportError:
+    HAS_PSYCOPG2 = False
+
 app = Flask(__name__)
 app.secret_key = os.getenv('SECRET_KEY', 'riverguard-capstone-secret-key-2026')
 CORS(app)
 
 db_path = os.path.join(app.root_path, 'river.db')
 
-# Must match gatewayApiKey in Main_Node_Fin03.ino (override via GATEWAY_API_KEY in Render)
+# Must match gatewayApiKey in Main_Node_Fin03.ino / Main_Node_Fin04.ino (override via GATEWAY_API_KEY in Render)
 DEFAULT_GATEWAY_KEY = 'rg-gateway-2026-key'
 
 # =========================================================
@@ -76,28 +83,99 @@ def gateway_key_required(f):
     return decorated
 
 
+_active_db_backend = 'sqlite'
+_active_env_sig = None
+_db_init_error = None
+
+
+def _current_db_env_sig():
+    return (
+        os.getenv('DATABASE_URL', '').strip(),
+        os.getenv('DB_URL', '').strip(),
+        os.getenv('DB_HOST', '').strip(),
+        os.getenv('DB_PORT', '').strip(),
+        os.getenv('DB_ENGINE', '').strip(),
+        os.getenv('DB_NAME', '').strip(),
+    )
+
+
+def detect_configured_backend():
+    """
+    Detects which persistent cloud database backend is configured via environment variables:
+      - 'postgresql': DATABASE_URL / DB_URL starting with postgres:// or postgresql://, or DB_ENGINE=postgres
+      - 'mysql': DATABASE_URL / DB_URL starting with mysql:// / mysql+pymysql://, or DB_HOST set (BriquetteTrack style)
+      - 'sqlite': Local fallback when no cloud database variables are configured
+    """
+    db_url = (os.getenv('DATABASE_URL') or os.getenv('DB_URL') or '').strip()
+    if db_url:
+        lower_url = db_url.lower()
+        if lower_url.startswith(('postgres://', 'postgresql://', 'postgresql+psycopg2://')):
+            return 'postgresql'
+        if lower_url.startswith(('mysql://', 'mysql+pymysql://', 'mariadb://')):
+            return 'mysql'
+
+    db_host = os.getenv('DB_HOST', '').strip()
+    if db_host:
+        engine = os.getenv('DB_ENGINE', '').strip().lower()
+        port = os.getenv('DB_PORT', '').strip()
+        if engine in ('postgres', 'postgresql', 'pgsql') or port == '5432':
+            return 'postgresql'
+        return 'mysql'
+
+    return 'sqlite'
+
+
+def get_db_backend():
+    """Returns the active initialized database backend ('mysql', 'postgresql', or 'sqlite')."""
+    if _active_env_sig != _current_db_env_sig():
+        init_db()
+    return _active_db_backend
+
+
 def is_mysql_configured():
-    """Check if Cloud MySQL / TiDB Serverless environment variables are set."""
-    if not HAS_PYMYSQL:
-        return False
-    return bool(os.getenv('DATABASE_URL') or os.getenv('DB_URL') or os.getenv('DB_HOST'))
+    """Backward-compatible helper indicating active Cloud MySQL / TiDB Serverless backend."""
+    return get_db_backend() == 'mysql'
+
+
+def _ensure_mysql_database_exists(base_kwargs, database):
+    """Automatically creates the target MySQL/TiDB database if Error 1049 (Unknown database) occurs."""
+    safe_db = re.sub(r'[^A-Za-z0-9_]', '', database) or 'riverguard_db'
+    for fallback_db in (None, 'test', 'defaultdb'):
+        try:
+            tmp_kwargs = dict(base_kwargs)
+            if fallback_db:
+                tmp_kwargs['database'] = fallback_db
+            else:
+                tmp_kwargs.pop('database', None)
+            tmp_conn = pymysql.connect(**tmp_kwargs)
+            try:
+                with tmp_conn.cursor() as cur:
+                    cur.execute(f"CREATE DATABASE IF NOT EXISTS `{safe_db}`")
+                tmp_conn.commit()
+                return safe_db
+            finally:
+                tmp_conn.close()
+        except Exception:
+            continue
+    return database
 
 
 def get_mysql_connection():
     """Connects to Cloud MySQL / TiDB Serverless (same deployment pattern as BriquetteTrack)."""
-    db_url = os.getenv('DATABASE_URL') or os.getenv('DB_URL')
-    if db_url:
+    db_url = (os.getenv('DATABASE_URL') or os.getenv('DB_URL') or '').strip()
+    if db_url and db_url.lower().startswith(('mysql://', 'mysql+pymysql://', 'mariadb://')):
         parsed = urlparse(db_url)
         host = parsed.hostname or 'localhost'
-        port = parsed.port or 3306
-        user = parsed.username or 'root'
-        password = parsed.password or ''
-        database = parsed.path.lstrip('/') or 'riverguard_db'
+        port = parsed.port or int(os.getenv('DB_PORT', 3306))
+        user = unquote(parsed.username) if parsed.username else 'root'
+        password = unquote(parsed.password) if parsed.password else ''
+        raw_path_db = unquote(parsed.path.lstrip('/')) if parsed.path else ''
+        database = raw_path_db or os.getenv('DB_NAME', 'riverguard_db')
     else:
-        host = os.getenv('DB_HOST', 'localhost')
-        user = os.getenv('DB_USER', 'root')
+        host = os.getenv('DB_HOST', 'localhost').strip()
+        user = os.getenv('DB_USER', 'root').strip()
         password = os.getenv('DB_PASSWORD', '')
-        database = os.getenv('DB_NAME', 'riverguard_db')
+        database = os.getenv('DB_NAME', 'riverguard_db').strip() or 'riverguard_db'
         port = int(os.getenv('DB_PORT', 3306))
 
     connect_kwargs = {
@@ -120,7 +198,64 @@ def get_mysql_connection():
         ssl_ctx.verify_mode = ssl.CERT_NONE
         connect_kwargs['ssl'] = ssl_ctx
 
-    return pymysql.connect(**connect_kwargs)
+    try:
+        return pymysql.connect(**connect_kwargs)
+    except pymysql.err.OperationalError as exc:
+        if exc.args and exc.args[0] == 1049:
+            created_db = _ensure_mysql_database_exists(connect_kwargs, database)
+            connect_kwargs['database'] = created_db
+            return pymysql.connect(**connect_kwargs)
+        raise
+
+
+def get_postgres_connection():
+    """Connects to Cloud PostgreSQL (Neon, Supabase, or Render PostgreSQL)."""
+    db_url = (os.getenv('DATABASE_URL') or os.getenv('DB_URL') or '').strip()
+    force_ssl = os.getenv('DB_SSL', '').lower() in ('true', '1', 'yes')
+    disable_ssl = os.getenv('DB_SSL', '').lower() in ('false', '0', 'no') or os.getenv('DB_SSL_DISABLED')
+
+    if db_url:
+        normalized_url = re.sub(r'^postgres(\+psycopg2)?://', 'postgresql://', db_url, flags=re.IGNORECASE)
+        normalized_url = re.sub(r'^postgresql\+psycopg2://', 'postgresql://', normalized_url, flags=re.IGNORECASE)
+        parsed = urlparse(normalized_url)
+        host = parsed.hostname or 'localhost'
+        is_remote = host not in ('localhost', '127.0.0.1', 'db')
+
+        connect_kwargs = {
+            'cursor_factory': psycopg2.extras.RealDictCursor,
+            'connect_timeout': 10
+        }
+        if ((is_remote and not disable_ssl) or force_ssl) and 'sslmode=' not in normalized_url.lower():
+            connect_kwargs['sslmode'] = 'require'
+
+        return psycopg2.connect(normalized_url, **connect_kwargs)
+
+    host = os.getenv('DB_HOST', 'localhost').strip()
+    port = int(os.getenv('DB_PORT', 5432))
+    user = os.getenv('DB_USER', 'postgres').strip()
+    password = os.getenv('DB_PASSWORD', '')
+    database = os.getenv('DB_NAME', 'riverguard_db').strip() or 'riverguard_db'
+    is_remote = host not in ('localhost', '127.0.0.1', 'db')
+
+    connect_kwargs = {
+        'host': host,
+        'port': port,
+        'user': user,
+        'password': password,
+        'dbname': database,
+        'cursor_factory': psycopg2.extras.RealDictCursor,
+        'connect_timeout': 10
+    }
+    if (is_remote and not disable_ssl) or force_ssl:
+        connect_kwargs['sslmode'] = 'require'
+
+    return psycopg2.connect(**connect_kwargs)
+
+
+def get_cloud_connection(backend):
+    if backend == 'postgresql':
+        return get_postgres_connection()
+    return get_mysql_connection()
 
 
 def get_sqlite_connection():
@@ -134,85 +269,171 @@ def get_sqlite_connection():
 
 
 # =========================================================
-# 1. INITIALIZE DATABASE
+# 1. INITIALIZE DATABASE (PERSISTENT CLOUD MYSQL / POSTGRES + SQLITE FALLBACK)
 # =========================================================
 def init_db():
+    global _active_db_backend, _active_env_sig, _db_init_error
+    _active_env_sig = _current_db_env_sig()
+    _db_init_error = None
+
     default_admin_user = os.getenv('ADMIN_USERNAME', 'admin')
     default_admin_email = os.getenv('ADMIN_EMAIL', 'admin@riverguard.com')
     default_admin_pass = os.getenv('ADMIN_PASSWORD', 'riverguard2026')
     password_hash = generate_password_hash(default_admin_pass)
 
-    if is_mysql_configured():
-        try:
-            conn = get_mysql_connection()
-            with conn.cursor() as cursor:
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS admins (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        username VARCHAR(80) NOT NULL UNIQUE,
-                        email VARCHAR(120) NOT NULL UNIQUE,
-                        password_hash VARCHAR(255) NOT NULL,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS registered_numbers (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        mobile_number VARCHAR(20) NOT NULL UNIQUE,
-                        full_name VARCHAR(120) DEFAULT '',
-                        location VARCHAR(160) DEFAULT '',
-                        additional_details VARCHAR(255) DEFAULT '',
-                        added_by_admin_id INT DEFAULT NULL,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        CONSTRAINT fk_registered_numbers_admin
-                            FOREIGN KEY (added_by_admin_id) REFERENCES admins(id)
-                            ON DELETE SET NULL ON UPDATE CASCADE
-                    )
-                ''')
-                cursor.execute("SHOW COLUMNS FROM registered_numbers LIKE 'added_by_admin_id'")
-                if not cursor.fetchone():
-                    cursor.execute("ALTER TABLE registered_numbers ADD COLUMN added_by_admin_id INT DEFAULT NULL")
+    configured = detect_configured_backend()
 
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS node_states (
-                        node_id INT PRIMARY KEY,
-                        distance INT NOT NULL DEFAULT 999,
-                        battery INT NOT NULL DEFAULT 100,
-                        rssi INT DEFAULT NULL,
-                        status VARCHAR(16) NOT NULL DEFAULT 'ONLINE',
-                        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    )
-                ''')
-                cursor.execute('''
-                    CREATE TABLE IF NOT EXISTS sensor_logs (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        node_id INT DEFAULT NULL,
-                        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        global_mode INT NOT NULL DEFAULT 1,
-                        node1_distance INT NOT NULL DEFAULT 999,
-                        nodes_json TEXT DEFAULT NULL,
-                        CONSTRAINT fk_sensor_logs_node
-                            FOREIGN KEY (node_id) REFERENCES node_states(node_id)
-                            ON DELETE SET NULL ON UPDATE CASCADE
-                    )
-                ''')
-                cursor.execute("SHOW COLUMNS FROM sensor_logs LIKE 'nodes_json'")
-                if not cursor.fetchone():
-                    cursor.execute("ALTER TABLE sensor_logs ADD COLUMN nodes_json TEXT DEFAULT NULL")
-                cursor.execute("SHOW COLUMNS FROM sensor_logs LIKE 'node_id'")
-                if not cursor.fetchone():
-                    cursor.execute("ALTER TABLE sensor_logs ADD COLUMN node_id INT DEFAULT NULL")
-                cursor.execute("SELECT COUNT(*) AS cnt FROM admins")
-                if cursor.fetchone()['cnt'] == 0:
-                    cursor.execute('''
-                        INSERT INTO admins (username, email, password_hash)
-                        VALUES (%s, %s, %s)
-                    ''', (default_admin_user, default_admin_email, password_hash))
-            conn.commit()
-            conn.close()
-            return
-        except Exception as e:
-            print(f"[WARN] Cloud MySQL init failed ({e}), falling back to SQLite WAL.")
+    if configured == 'postgresql':
+        if not HAS_PSYCOPG2:
+            _db_init_error = "psycopg2-binary not installed; falling back to SQLite"
+            print(f"[WARN] {_db_init_error}")
+        else:
+            try:
+                conn = get_postgres_connection()
+                try:
+                    with conn.cursor() as cursor:
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS admins (
+                                id SERIAL PRIMARY KEY,
+                                username VARCHAR(80) NOT NULL UNIQUE,
+                                email VARCHAR(120) NOT NULL UNIQUE,
+                                password_hash VARCHAR(255) NOT NULL,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        ''')
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS registered_numbers (
+                                id SERIAL PRIMARY KEY,
+                                mobile_number VARCHAR(20) NOT NULL UNIQUE,
+                                full_name VARCHAR(120) DEFAULT '',
+                                location VARCHAR(160) DEFAULT '',
+                                additional_details VARCHAR(255) DEFAULT '',
+                                added_by_admin_id INTEGER DEFAULT NULL
+                                    REFERENCES admins(id) ON DELETE SET NULL ON UPDATE CASCADE,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        ''')
+                        cursor.execute(
+                            "ALTER TABLE registered_numbers ADD COLUMN IF NOT EXISTS added_by_admin_id INTEGER DEFAULT NULL"
+                        )
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS node_states (
+                                node_id INTEGER PRIMARY KEY,
+                                distance INTEGER NOT NULL DEFAULT 999,
+                                battery INTEGER NOT NULL DEFAULT 100,
+                                rssi INTEGER DEFAULT NULL,
+                                status VARCHAR(16) NOT NULL DEFAULT 'ONLINE',
+                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            )
+                        ''')
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS sensor_logs (
+                                id SERIAL PRIMARY KEY,
+                                node_id INTEGER DEFAULT NULL
+                                    REFERENCES node_states(node_id) ON DELETE SET NULL ON UPDATE CASCADE,
+                                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                global_mode INTEGER NOT NULL DEFAULT 1,
+                                node1_distance INTEGER NOT NULL DEFAULT 999,
+                                nodes_json TEXT DEFAULT NULL
+                            )
+                        ''')
+                        cursor.execute("ALTER TABLE sensor_logs ADD COLUMN IF NOT EXISTS nodes_json TEXT DEFAULT NULL")
+                        cursor.execute("ALTER TABLE sensor_logs ADD COLUMN IF NOT EXISTS node_id INTEGER DEFAULT NULL")
+
+                        cursor.execute("SELECT COUNT(*) AS cnt FROM admins")
+                        if int(cursor.fetchone()['cnt']) == 0:
+                            cursor.execute('''
+                                INSERT INTO admins (username, email, password_hash)
+                                VALUES (%s, %s, %s)
+                            ''', (default_admin_user, default_admin_email, password_hash))
+                    conn.commit()
+                finally:
+                    conn.close()
+                _active_db_backend = 'postgresql'
+                return
+            except Exception as e:
+                _db_init_error = f"{type(e).__name__}: Cloud PostgreSQL connection failed"
+                print(f"[WARN] Cloud PostgreSQL init failed ({e}), falling back to SQLite WAL.")
+
+    elif configured == 'mysql':
+        if not HAS_PYMYSQL:
+            _db_init_error = "PyMySQL not installed; falling back to SQLite"
+            print(f"[WARN] {_db_init_error}")
+        else:
+            try:
+                conn = get_mysql_connection()
+                try:
+                    with conn.cursor() as cursor:
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS admins (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                username VARCHAR(80) NOT NULL UNIQUE,
+                                email VARCHAR(120) NOT NULL UNIQUE,
+                                password_hash VARCHAR(255) NOT NULL,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                            )
+                        ''')
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS registered_numbers (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                mobile_number VARCHAR(20) NOT NULL UNIQUE,
+                                full_name VARCHAR(120) DEFAULT '',
+                                location VARCHAR(160) DEFAULT '',
+                                additional_details VARCHAR(255) DEFAULT '',
+                                added_by_admin_id INT DEFAULT NULL,
+                                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                CONSTRAINT fk_registered_numbers_admin
+                                    FOREIGN KEY (added_by_admin_id) REFERENCES admins(id)
+                                    ON DELETE SET NULL ON UPDATE CASCADE
+                            )
+                        ''')
+                        cursor.execute("SHOW COLUMNS FROM registered_numbers LIKE 'added_by_admin_id'")
+                        if not cursor.fetchone():
+                            cursor.execute("ALTER TABLE registered_numbers ADD COLUMN added_by_admin_id INT DEFAULT NULL")
+
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS node_states (
+                                node_id INT PRIMARY KEY,
+                                distance INT NOT NULL DEFAULT 999,
+                                battery INT NOT NULL DEFAULT 100,
+                                rssi INT DEFAULT NULL,
+                                status VARCHAR(16) NOT NULL DEFAULT 'ONLINE',
+                                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                            )
+                        ''')
+                        cursor.execute('''
+                            CREATE TABLE IF NOT EXISTS sensor_logs (
+                                id INT AUTO_INCREMENT PRIMARY KEY,
+                                node_id INT DEFAULT NULL,
+                                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                                global_mode INT NOT NULL DEFAULT 1,
+                                node1_distance INT NOT NULL DEFAULT 999,
+                                nodes_json TEXT DEFAULT NULL,
+                                CONSTRAINT fk_sensor_logs_node
+                                    FOREIGN KEY (node_id) REFERENCES node_states(node_id)
+                                    ON DELETE SET NULL ON UPDATE CASCADE
+                            )
+                        ''')
+                        cursor.execute("SHOW COLUMNS FROM sensor_logs LIKE 'nodes_json'")
+                        if not cursor.fetchone():
+                            cursor.execute("ALTER TABLE sensor_logs ADD COLUMN nodes_json TEXT DEFAULT NULL")
+                        cursor.execute("SHOW COLUMNS FROM sensor_logs LIKE 'node_id'")
+                        if not cursor.fetchone():
+                            cursor.execute("ALTER TABLE sensor_logs ADD COLUMN node_id INT DEFAULT NULL")
+                        cursor.execute("SELECT COUNT(*) AS cnt FROM admins")
+                        if int(cursor.fetchone()['cnt']) == 0:
+                            cursor.execute('''
+                                INSERT INTO admins (username, email, password_hash)
+                                VALUES (%s, %s, %s)
+                            ''', (default_admin_user, default_admin_email, password_hash))
+                    conn.commit()
+                finally:
+                    conn.close()
+                _active_db_backend = 'mysql'
+                return
+            except Exception as e:
+                _db_init_error = f"{type(e).__name__}: Cloud MySQL connection failed"
+                print(f"[WARN] Cloud MySQL init failed ({e}), falling back to SQLite WAL.")
 
     conn = get_sqlite_connection()
     cursor = conn.cursor()
@@ -283,6 +504,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+    _active_db_backend = 'sqlite'
 
 
 init_db()
@@ -436,28 +658,41 @@ def receive_hardware_data():
             return jsonify({"error": "No valid node telemetry provided"}), 400
 
         utc_now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+        backend = get_db_backend()
 
-        if is_mysql_configured():
-            conn = get_mysql_connection()
+        if backend in ('mysql', 'postgresql'):
+            conn = get_cloud_connection(backend)
             try:
                 with conn.cursor() as cursor:
                     for n in incoming_nodes:
-                        cursor.execute('''
-                            INSERT INTO node_states (node_id, distance, battery, rssi, status, updated_at)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                            ON DUPLICATE KEY UPDATE
-                                distance = VALUES(distance),
-                                battery = VALUES(battery),
-                                rssi = VALUES(rssi),
-                                status = VALUES(status),
-                                updated_at = VALUES(updated_at)
-                        ''', (n['id'], n['distance'], n['battery'], n['rssi'], n['status'], utc_now_str))
+                        if backend == 'postgresql':
+                            cursor.execute('''
+                                INSERT INTO node_states (node_id, distance, battery, rssi, status, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (node_id) DO UPDATE SET
+                                    distance = EXCLUDED.distance,
+                                    battery = EXCLUDED.battery,
+                                    rssi = EXCLUDED.rssi,
+                                    status = EXCLUDED.status,
+                                    updated_at = EXCLUDED.updated_at
+                            ''', (n['id'], n['distance'], n['battery'], n['rssi'], n['status'], utc_now_str))
+                        else:
+                            cursor.execute('''
+                                INSERT INTO node_states (node_id, distance, battery, rssi, status, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                                ON DUPLICATE KEY UPDATE
+                                    distance = VALUES(distance),
+                                    battery = VALUES(battery),
+                                    rssi = VALUES(rssi),
+                                    status = VALUES(status),
+                                    updated_at = VALUES(updated_at)
+                            ''', (n['id'], n['distance'], n['battery'], n['rssi'], n['status'], utc_now_str))
 
                     cursor.execute('''
                         SELECT node_id AS id, distance, battery, rssi, status
                         FROM node_states ORDER BY node_id ASC
                     ''')
-                    all_nodes = cursor.fetchall()
+                    all_nodes = [dict(r) for r in cursor.fetchall()]
 
                     system_mode = int(raw_mode) if raw_mode is not None else compute_threat_mode(all_nodes)
                     primary_node_obj = select_primary_node(all_nodes)
@@ -530,8 +765,9 @@ def get_latest_data():
                 resp.headers['Cache-Control'] = 'no-store'
                 return resp, 200
 
-        if is_mysql_configured():
-            conn = get_mysql_connection()
+        backend = get_db_backend()
+        if backend in ('mysql', 'postgresql'):
+            conn = get_cloud_connection(backend)
             try:
                 with conn.cursor() as cursor:
                     cursor.execute('''
@@ -539,7 +775,7 @@ def get_latest_data():
                         FROM sensor_logs
                         ORDER BY id DESC LIMIT 20
                     ''')
-                    rows = cursor.fetchall()
+                    rows = [dict(r) for r in cursor.fetchall()]
             finally:
                 conn.close()
         else:
@@ -597,12 +833,13 @@ def get_latest_data():
 @gateway_key_required
 def get_numbers():
     """
-    Returns active registered mobile numbers for Main_Node_Fin03 SIM800L (protected by X-API-Key).
+    Returns active registered mobile numbers for Main_Node_Fin03 / Main_Node_Fin04 SIM800L (protected by X-API-Key).
     Plain-text comma-separated: +639171111111,+639182222222 (or empty string if none).
     """
     try:
-        if is_mysql_configured():
-            conn = get_mysql_connection()
+        backend = get_db_backend()
+        if backend in ('mysql', 'postgresql'):
+            conn = get_cloud_connection(backend)
             try:
                 with conn.cursor() as cursor:
                     cursor.execute("SELECT mobile_number FROM registered_numbers ORDER BY id ASC")
@@ -671,9 +908,10 @@ def register_mobile_number():
 
         utc_now_str = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         admin_id_fk = session.get('admin_id') if session.get('admin_logged_in') else None
+        backend = get_db_backend()
 
-        if is_mysql_configured():
-            conn = get_mysql_connection()
+        if backend in ('mysql', 'postgresql'):
+            conn = get_cloud_connection(backend)
             try:
                 with conn.cursor() as cursor:
                     cursor.execute(
@@ -733,15 +971,17 @@ def admin_login():
         password = request.form.get('password', '')
 
         admin_row = None
-        if is_mysql_configured():
-            conn = get_mysql_connection()
+        backend = get_db_backend()
+        if backend in ('mysql', 'postgresql'):
+            conn = get_cloud_connection(backend)
             try:
                 with conn.cursor() as cursor:
                     cursor.execute(
                         "SELECT id, username, email, password_hash FROM admins WHERE username = %s OR email = %s",
                         (identifier, identifier)
                     )
-                    admin_row = cursor.fetchone()
+                    row = cursor.fetchone()
+                    admin_row = dict(row) if row else None
             finally:
                 conn.close()
         else:
@@ -779,8 +1019,9 @@ def admin_logout():
 @admin_required
 def list_registered_numbers():
     try:
-        if is_mysql_configured():
-            conn = get_mysql_connection()
+        backend = get_db_backend()
+        if backend in ('mysql', 'postgresql'):
+            conn = get_cloud_connection(backend)
             try:
                 with conn.cursor() as cursor:
                     cursor.execute('''
@@ -788,7 +1029,7 @@ def list_registered_numbers():
                         FROM registered_numbers
                         ORDER BY id DESC
                     ''')
-                    rows = cursor.fetchall()
+                    rows = [dict(r) for r in cursor.fetchall()]
             finally:
                 conn.close()
         else:
@@ -826,14 +1067,16 @@ def list_registered_numbers():
 def delete_registered_number(record_id):
     try:
         deleted = 0
-        if is_mysql_configured():
-            conn = get_mysql_connection()
+        backend = get_db_backend()
+        if backend in ('mysql', 'postgresql'):
+            conn = get_cloud_connection(backend)
             try:
                 with conn.cursor() as cursor:
-                    deleted = cursor.execute(
+                    cursor.execute(
                         "DELETE FROM registered_numbers WHERE id = %s",
                         (record_id,)
                     )
+                    deleted = cursor.rowcount
                 conn.commit()
             finally:
                 conn.close()
@@ -855,6 +1098,26 @@ def delete_registered_number(record_id):
         return jsonify({"message": "Number deleted successfully"}), 200
     except Exception:
         return jsonify({"error": "Delete Operation Failed. Please Try Again"}), 500
+
+
+# =========================================================
+# 9. DATABASE & SERVICE HEALTH CHECK (/api/health)
+# =========================================================
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    backend = get_db_backend()
+    configured = detect_configured_backend()
+    payload = {
+        "status": "ok",
+        "db_backend": backend,
+        "configured_backend": configured,
+        "persistent": backend in ('mysql', 'postgresql')
+    }
+    if _db_init_error:
+        payload["db_warning"] = _db_init_error
+    resp = jsonify(payload)
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp, 200
 
 
 if __name__ == '__main__':
